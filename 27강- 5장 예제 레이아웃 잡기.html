@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <link rel="stylesheet" href="https://unpkg.com/ress/dist/ress.min.css">
+  <link href="https://fonts.googleapis.com/css2?family=Hanalei+Fill&family=Nanum+Gothic&display=swap" rel="stylesheet">
+  <style>
+    * {font-family: 'Nanum Gothic', sans-serif;}
+    .header > h1 {font-family: 'Hanalei Fill', cursive;}
+    li { list-style: none;}
+  </style>
+  <style>
+    .container{
+      width: 960px;
+      margin: 0 auto;}
+    .content { overflow: hidden; }
+    .section { width: 700px; float: left; }
+    .aside { width: 250px; float: right; }
+
+    ul { overflow: hidden; }
+    li { float: left;}
+
+    .header { 
+      height: 100px;
+      position: relative;
+    }
+    .header h1 {
+      position: absolute;
+      left: 10px;
+      top: 30px;
+    }
+    .gnb {
+      position: absolute;
+      right: 0;
+      top: 0;
+    }
+    .lnb {
+      position: absolute;
+      right: 0;
+      bottom: 0;
+    }
+    .container div {
+      box-sizing: border-box;
+      border: 1px solid black;
+      margin-top: 5px;
+      margin-bottom: 5px;
+    }
+  </style>
+  <style>
+    input {
+      display: none;
+    }
+    input:nth-of-type(1) ~ div:nth-of-type(1) {
+      display: none;
+    }
+    input:nth-of-type(2) ~ div:nth-of-type(2) {
+      display: none;
+    }
+    input:nth-of-type(1):checked ~ div:nth-of-type(1) {
+      display: block;
+    }
+    input:nth-of-type(2):checked ~ div:nth-of-type(2) {
+      display: block;
+    }
+  </style>
+
+
+
+
+</head>
+<body>
+    
+  <div class="container">
+    <div class="header">
+      <h1>Lorem Ipsum</h1>
+      <div class="gnb">
+        <ul>
+          <li>Lorem</li>
+          <li>Ipsum</li>
+          <li>Dolor</li>
+          <li>Sit</li>
+          <li>Amet</li>
+        </ul>
+      </div>
+      <div class="lnb">
+        <ul>
+          <li>Lorem</li>
+          <li>Ipsum</li>
+          <li>Dolor</li>
+          <li>Sit</li>
+          <li>Amet</li>
+          <li>Cronosa</li>
+          <li>Condrasa</li>
+        </ul>
+      </div>
+    </div>
+    <div class="content">
+      <div class="section">
+        <article>
+          <h1>Lorem Ipsum</h1>
+          <p>Tempor est elit pariatur velit et reprehenderit deserunt commodo laboris ullamco. In id sunt adipisicing labore reprehenderit incididunt ex in ea veniam dolor anim tempor. Aliquip culpa consequat nulla ipsum mollit exercitation eu anim eu irure. Adipisicing aute sit do tempor cupidatat eiusmod velit. Eu enim pariatur do pariatur velit non minim cillum incididunt. Est incididunt officia consectetur sint minim.</p>
+          <p>Irure consequat eu deserunt ad amet Lorem Lorem cillum laborum dolore velit elit. Excepteur consequat do dolor nostrud nisi pariatur eu eiusmod enim amet adipisicing. Amet nostrud consectetur culpa pariatur aute magna ipsum nostrud laboris minim.</p>
+          <p>Irure eu velit nostrud aute laborum esse excepteur. Pariatur voluptate magna enim ut excepteur deserunt dolore ullamco dolor enim. Adipisicing non proident in ullamco aliqua laborum magna ex ut voluptate exercitation. Ut sint amet nisi magna duis excepteur qui. Pariatur qui nisi id consequat nulla nisi qui consectetur laboris. Minim nostrud amet laborum labore sunt aliquip velit reprehenderit ea labore fugiat commodo.</p>
+        </article>
+      </div>
+      <div class="aside">
+        <label for="tab-1">Tab1</label>
+        <label for="tab-2">Tab2</label>
+        <input type="radio" name="tab" id="tab-1" checked="checked">
+        <input type="radio" name="tab" id="tab-2">
+        <div class="tab-item">Dolore cupidatat in consequat occaecat ipsum. Duis nisi irure ullamco excepteur do proident ex laborum adipisicing sint occaecat commodo. Qui magna Lorem adipisicing tempor.</div>
+        <div class="tab-item">Aute ea ea id esse elit magna. Nisi eu magna cillum velit proident anim minim in incididunt Lorem do ut. Ipsum anim elit enim sunt eu officia ea esse aliqua amet ullamco. Adipisicing incididunt dolor eiusmod nulla non exercitation eiusmod tempor amet ex do.</div>
+      </div>
+    </div>
+    <div class="footer">
+      <p>Sint mollit sint cupidatat esse. Aliqua veniam in officia minim esse magna consequat consectetur enim ut proident est. Lorem officia sit in anim dolore laborum nisi consectetur minim reprehenderit. Nulla consectetur laboris quis deserunt laborum ut occaecat pariatur non pariatur non. Lorem nulla elit ullamco laboris est eu aute magna nisi.</p>
+    </div>
+  </div>
+
+
+
+
+
+
+
+
+</body>
+</html>
