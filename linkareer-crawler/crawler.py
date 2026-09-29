@@ -37,6 +37,8 @@ class Activity:
     kind: str  # 공모전 / 대외활동
     title: str = ""
     organizer: str = ""
+    organization_type: str = ""  # 대기업, 공공기관/공기업 등 (상세 페이지에만 있음)
+    reward: int | None = None  # 시상 규모 (만원)
     categories: list[str] = field(default_factory=list)
     close_date: date | None = None
     view_count: int | None = None
@@ -50,6 +52,8 @@ class Activity:
         """비어 있는 필드만 other 값으로 채운다."""
         self.title = self.title or other.title
         self.organizer = self.organizer or other.organizer
+        self.organization_type = self.organization_type or other.organization_type
+        self.reward = self.reward if self.reward is not None else other.reward
         self.categories = self.categories or other.categories
         self.close_date = self.close_date or other.close_date
         self.view_count = self.view_count if self.view_count is not None else other.view_count
@@ -207,21 +211,24 @@ def _to_activity(d: dict, refs: dict, kind: str) -> Activity:
         if isinstance(org_obj, dict):
             org = _first(org_obj, "name", "fullName")
     categories = []
-    for c in d.get("categories") or []:
+    for c in (d.get("categories") or []) + (d.get("interests") or []):
         c = _resolve(c, refs)
         name = c.get("name") if isinstance(c, dict) else c
-        if isinstance(name, str):
+        if isinstance(name, str) and name not in categories:
             categories.append(name)
     desc = _first(d, "detailText", "text", "content", "description") or ""
     desc = _resolve(desc, refs)
     if isinstance(desc, dict):
         desc = _first(desc, "text", "content") or ""
     views = _first(d, "viewCount", "views")
+    reward = d.get("tenThousandUnitOfReward")
     return Activity(
         id=str(d["id"]),
         kind=kind,
         title=str(_first(d, "title", "name") or ""),
         organizer=str(org or ""),
+        organization_type=str(d.get("organizationType") or ""),
+        reward=int(reward) if isinstance(reward, (int, float)) and reward > 0 else None,
         categories=categories,
         close_date=_to_date(_first(d, "recruitCloseAt", "closeAt", "endAt", "deadline", "dueDate")),
         view_count=int(views) if isinstance(views, (int, float)) else None,

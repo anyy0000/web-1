@@ -91,13 +91,15 @@ def main() -> int:
                 seen_rows.append([a.id, today.isoformat(), f"제외({m.score})"])
                 continue
             print(f"  + [{m.label} {m.score}] {a.title} / {a.organizer or '-'}")
-            rows.append([
-                a.id, a.kind, m.label, m.score, a.title, a.organizer,
-                ", ".join(a.categories), a.close_date, None,
-                " | ".join(m.reasons), a.url, today.isoformat(), "", "",
-            ])
+            rows.append({
+                "ID": a.id, "구분": a.kind, "추천도": m.label, "점수": m.score,
+                "제목": a.title, "주최": a.organizer, "기관유형": a.organization_type,
+                "분야": ", ".join(a.categories), "마감일": a.close_date,
+                "시상(만원)": a.reward or "", "매칭근거": " | ".join(m.reasons),
+                "링크": a.url, "수집일": today.isoformat(),
+            })
 
-    rows.sort(key=lambda r: (-r[3], r[7] or today))
+    rows.sort(key=lambda r: (-r["점수"], r["마감일"] or today))
     print("요약:", ", ".join(f"{k} {v}" for k, v in stats.items()))
 
     for s in storages:

@@ -12,14 +12,21 @@ import os
 from datetime import date
 from pathlib import Path
 
-HEADER = ["ID", "구분", "추천도", "점수", "제목", "주최", "분야", "마감일", "D-day",
-          "매칭근거", "링크", "수집일", "상태", "메모"]
-DEADLINE_COL = "H"  # 마감일 열 (D-day 수식이 참조)
+HEADER = ["ID", "구분", "추천도", "점수", "제목", "주최", "기관유형", "분야", "마감일", "D-day",
+          "시상(만원)", "매칭근거", "링크", "수집일", "상태", "메모"]
+COL = {name: i for i, name in enumerate(HEADER)}
+DEADLINE_COL = chr(ord("A") + COL["마감일"])  # D-day 수식이 참조하는 열 문자
 SEEN_TAB = "_seen"
 
 
 def dday_formula(row: int) -> str:
     return f'=IF({DEADLINE_COL}{row}="","",{DEADLINE_COL}{row}-TODAY())'
+
+
+def to_list(row: dict, row_no: int) -> list:
+    values = [row.get(name, "") for name in HEADER]
+    values[COL["D-day"]] = dday_formula(row_no)
+    return values
 
 
 class SheetStorage:
@@ -53,14 +60,14 @@ class SheetStorage:
         ids = set(self.ws.col_values(1)[1:]) | set(self.seen_ws.col_values(1)[1:])
         return {i for i in ids if i}
 
-    def append(self, rows: list[list], seen: list[list]) -> None:
+    def append(self, rows: list[dict], seen: list[list]) -> None:
         if rows:
             start = len(self.ws.col_values(1)) + 1
             values = []
-            for i, r in enumerate(rows):
-                r = list(r)
-                r[7] = r[7].isoformat() if isinstance(r[7], date) else r[7]
-                r[8] = dday_formula(start + i)
+            for i, row in enumerate(rows):
+                r = to_list(row, start + i)
+                d = r[COL["마감일"]]
+                r[COL["마감일"]] = d.isoformat() if isinstance(d, date) else d
                 values.append(r)
             self.ws.append_rows(values, value_input_option="USER_ENTERED")
         if seen:
@@ -98,14 +105,12 @@ class ExcelStorage:
                     ids.add(str(value))
         return ids
 
-    def append(self, rows: list[list], seen: list[list]) -> None:
-        for r in rows:
-            r = list(r)
+    def append(self, rows: list[dict], seen: list[list]) -> None:
+        for row in rows:
             row_no = self.ws.max_row + 1
-            r[8] = dday_formula(row_no)
-            self.ws.append(r)
-            self.ws.cell(row_no, 8).number_format = "yyyy-mm-dd"
-            self.ws.cell(row_no, 11).hyperlink = r[10]
+            self.ws.append(to_list(row, row_no))
+            self.ws.cell(row_no, COL["마감일"] + 1).number_format = "yyyy-mm-dd"
+            self.ws.cell(row_no, COL["링크"] + 1).hyperlink = row["링크"]
         for s in seen:
             self.seen_ws.append(s)
         self.wb.save(self.path)
