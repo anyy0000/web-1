@@ -28,20 +28,20 @@ class Match:
 
 
 class RelevanceFilter:
-    def __init__(self, config: dict, extra: dict[str, list[str]] | None = None):
-        """config: config.yaml, extra: 스프레드시트 '설정' 탭에서 읽은 추가 항목."""
-        extra = extra or {}
-        orgs = list(config.get("organizations", [])) + extra.get("관심기업", [])
-        self.org_patterns = [_compile(p) for p in orgs]
-        self.blocked_orgs = [_compile(p) for p in extra.get("제외기업", [])]
-        self.categories = [c.strip() for c in list(config.get("categories", [])) + extra.get("관심분야", [])]
-        self.sub_categories = [c.strip() for c in
-                               list(config.get("sub_categories", [])) + extra.get("참고분야", [])]
-        self.org_keywords = [k.lower() for k in config.get("organizer_keywords", [])]
-        self.content_keywords = _dedupe(
-            [k.lower() for k in list(config.get("content_keywords", [])) + extra.get("키워드", [])])
-        self.exclude_keywords = _dedupe(
-            [k.lower() for k in list(config.get("exclude_keywords", [])) + extra.get("제외키워드", [])])
+    def __init__(self, config: dict, sheet: dict[str, list[str]] | None = None):
+        """sheet: 스프레드시트 '설정' 탭 내용. 있으면 조건 목록은 시트만 쓴다(추가·삭제 모두 반영).
+        없으면(엑셀 모드) config.yaml 목록을 쓴다."""
+        def items(kind: str, key: str) -> list[str]:
+            values = sheet.get(kind, []) if sheet is not None else config.get(key, [])
+            return _dedupe([str(v) for v in values])
+
+        self.org_patterns = [_compile(p) for p in items("관심기업", "organizations")]
+        self.blocked_orgs = [_compile(p) for p in items("제외기업", "blocked_organizations")]
+        self.categories = items("관심분야", "categories")
+        self.sub_categories = items("참고분야", "sub_categories")
+        self.org_keywords = [k.lower() for k in items("주최키워드", "organizer_keywords")]
+        self.content_keywords = [k.lower() for k in items("키워드", "content_keywords")]
+        self.exclude_keywords = [k.lower() for k in items("제외키워드", "exclude_keywords")]
         scoring = config.get("scoring", {})
         self.recommend = scoring.get("recommend_threshold", 4)
         self.review = scoring.get("review_threshold", 2)

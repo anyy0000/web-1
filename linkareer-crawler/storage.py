@@ -23,15 +23,29 @@ DEADLINE_COL = chr(ord("A") + HEADER.index("마감일"))
 MAIN_TAB = "링커리어"
 SEEN_TAB = "_seen"
 SETTINGS_TAB = "설정"
-SETTINGS_HEADER = ["구분", "값", "설명"]
-SETTINGS_DEFAULT = [
-    ["관심분야", "요리/식품", "링커리어 분야명과 똑같이 적기. 일치하면 +4점(추천)"],
-    ["참고분야", "의료/보건", "일치하면 +2점(검토). 다른 조건과 합쳐 4점 이상이면 추천"],
-    ["참고분야", "체육/헬스", ""],
-    ["관심기업", "", "기업·기관명(일부만 적어도 됨). 이 곳이 주최하면 추천"],
-    ["키워드", "", "제목에 있으면 +2점, 본문에 있으면 +1점 (4점 이상 추천, 2~3점 검토)"],
-    ["제외키워드", "", "제목·본문에 있으면 -3점"],
-    ["제외기업", "", "이 주최사의 공고는 항상 제외"],
+SETTINGS_HEADER = ["구분", "값", "메모"]
+# 설정 탭 구분 ↔ config.yaml 키 (처음 한 번 config.yaml 내용을 시트로 옮긴다)
+SETTING_KINDS = {
+    "관심기업": "organizations", "관심분야": "categories", "참고분야": "sub_categories",
+    "주최키워드": "organizer_keywords", "키워드": "content_keywords",
+    "제외키워드": "exclude_keywords", "제외기업": None,
+}
+GUIDE_MARK = "조건 설명 (v2)"
+GUIDE = [
+    [GUIDE_MARK, "점수", "설명"],
+    ["관심기업", "+4 → 추천", "주최사 이름에 이 글자가 들어가면. 일부만 적어도 됨 (예: 'CJ' → CJ제일제당·CJ프레시웨이 모두)"],
+    ["관심분야", "+4 → 추천", "링커리어 분야와 정확히 같을 때. 메인 탭 '분야' 열에 나온 이름을 복사해서 적기"],
+    ["참고분야", "+2 → 검토", "링커리어 분야와 정확히 같을 때. 다른 조건과 합쳐 4점 이상이면 추천"],
+    ["주최키워드", "+3", "주최사 이름에 들어가면 (업종 추정용: 식품, 제약, 헬스 …)"],
+    ["키워드", "제목 +2 / 본문 +1", "제목은 최대 +4, 본문(포스터 OCR 포함)은 최대 +3"],
+    ["제외키워드", "-3", "제목·본문에 들어가면 감점 (예: '금융 건강')"],
+    ["제외기업", "항상 제외", "이 주최사 공고는 점수와 관계없이 제외"],
+    ["", "", ""],
+    ["판정", "", "합계 4점 이상 = 추천, 2~3점 = 검토, 그 미만은 시트에 넣지 않음"],
+    ["사용법", "", "A~B열에 한 줄씩 '구분'과 '값'을 적거나 지우면 다음 실행부터 반영. 빈 줄은 무시"],
+    ["적용 범위", "", "이후 새로 올라오는 공고부터 적용. 이미 제외된 공고도 다시 보려면 _seen 탭 2행부터 아래를 지우기"],
+    ["분야 예시", "", "요리/식품, 의료/보건, 체육/헬스, 뷰티/미용/화장품, 기획/아이디어, 광고/마케팅, 서포터즈, 봉사활동, 과학/공학"],
+    ["re:로 시작", "", "특수 패턴(정규식)입니다. 예: '대상'이 '참가대상'과 헷갈리지 않게 막는 용도라 그대로 두세요"],
 ]
 # 행 위치와 무관하게 동작 (정렬해도 깨지지 않음)
 DDAY_FORMULA = f'=IF(INDIRECT("{DEADLINE_COL}"&ROW())="","",DAYS(INDIRECT("{DEADLINE_COL}"&ROW()),TODAY()))'
@@ -119,7 +133,7 @@ class SheetStorage:
         self.sh = gc.open_by_key(spreadsheet_id)
         self.ws = self._get_or_create(MAIN_TAB, HEADER)
         self.seen_ws = self._get_or_create(SEEN_TAB, ["ID", "처리일", "결과"])
-        self.settings_ws = self._get_or_create(SETTINGS_TAB, SETTINGS_HEADER, SETTINGS_DEFAULT)
+        self.settings_ws = self._settings_sheet()
 
     def _get_or_create(self, title: str, header: list[str], defaults: list[list] | None = None):
         import gspread
@@ -133,13 +147,59 @@ class SheetStorage:
             ws.freeze(rows=1)
         return ws
 
+    def _settings_sheet(self):
+        """'설정' 탭을 준비한다. 비어 있는 기본 시트(시트1)가 있으면 그걸 설정 탭으로 쓴다."""
+        import gspread
+
+        titles = [w.title for w in self.sh.worksheets()]
+        blank = next((self.sh.worksheet(t) for t in ("시트1", "Sheet1")
+                      if t in titles and not any(self.sh.worksheet(t).get_all_values())), None)
+        if SETTINGS_TAB in titles:
+            ws = self.sh.worksheet(SETTINGS_TAB)
+            if blank is not None:
+                self.sh.del_worksheet(blank)
+        elif blank is not None:
+            blank.update_title(SETTINGS_TAB)
+            ws = blank
+        else:
+            ws = self.sh.add_worksheet(title=SETTINGS_TAB, rows=500, cols=8)
+        try:
+            ws.update_index(0)  # 맨 앞 탭으로
+        except gspread.exceptions.APIError:
+            pass
+        return ws
+
+    def seed_settings(self, config: dict) -> None:
+        """처음 한 번(설명 표가 없을 때) config.yaml 의 모든 조건을 설정 탭으로 옮기고 설명 표를 붙인다."""
+        values = self.settings_ws.get_all_values()
+        if values and len(values[0]) >= 5 and values[0][4] == GUIDE_MARK:
+            return
+        order = list(SETTING_KINDS)
+        rows = [r[:3] + [""] * (3 - len(r[:3])) for r in values[1:] if len(r) >= 2 and r[0].strip() and r[1].strip()]
+        have = {(r[0].strip(), r[1].strip()) for r in rows}
+        for kind, key in SETTING_KINDS.items():
+            for v in (config.get(key, []) if key else []):
+                if (kind, str(v)) not in have:
+                    rows.append([kind, str(v), ""])
+                    have.add((kind, str(v)))
+        rows.sort(key=lambda r: order.index(r[0]) if r[0] in order else len(order))
+        body = [SETTINGS_HEADER] + rows
+        n = max(len(body), len(GUIDE))
+        table = [(body[i] if i < len(body) else ["", "", ""]) + [""] +
+                 (GUIDE[i] if i < len(GUIDE) else ["", "", ""]) for i in range(n)]
+        self.settings_ws.resize(rows=max(self.settings_ws.row_count, n + 100), cols=max(self.settings_ws.col_count, 7))
+        self.settings_ws.clear()
+        self.settings_ws.update(table, "A1", value_input_option="RAW")
+        self.settings_ws.freeze(rows=1)
+        print(f"설정 탭 초기화: 조건 {len(rows)}개 + 설명 표")
+
     def load_rows(self) -> list[dict]:
         return rows_from_table(self.ws.get_all_values(value_render_option="UNFORMATTED_VALUE"))
 
     def seen_ids(self) -> set[str]:
         return {r["ID"] for r in self.load_rows()} | {str(i) for i in self.seen_ws.col_values(1)[1:] if i}
 
-    def load_settings(self) -> dict[str, list[str]]:
+    def load_settings(self) -> dict[str, list[str]] | None:
         settings: dict[str, list[str]] = {}
         for row in self.settings_ws.get_all_values()[1:]:
             if len(row) >= 2 and row[0].strip() and row[1].strip():
@@ -191,8 +251,8 @@ class ExcelStorage:
                 ids.add(str(value))
         return ids
 
-    def load_settings(self) -> dict[str, list[str]]:
-        return {}
+    def load_settings(self) -> dict[str, list[str]] | None:
+        return None  # 엑셀 모드는 config.yaml 만 사용
 
     def save(self, rows: list[dict], seen: list[list]) -> None:
         header, table = build_table(rows)

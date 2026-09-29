@@ -146,14 +146,11 @@ def parse_detail(html: str, base: Activity) -> Activity:
         result.title = og_title.get("content", "").split("|")[0].strip()
     meta_desc = soup.find("meta", attrs={"name": "description"})
     meta_text = meta_desc.get("content", "") if meta_desc else ""
-    if result.description:
-        result.description = f"{meta_text} {result.description}".strip()
-    else:
-        # 본문을 JSON에서 못 찾은 경우에만 페이지 전체 텍스트 사용
-        # (사이드바의 다른 공고 제목 때문에 오탐이 생길 수 있음)
-        for tag in soup(["script", "style", "noscript", "header", "footer", "nav", "aside"]):
-            tag.decompose()
-        result.description = f"{meta_text} {soup.get_text(' ', strip=True)}"[:8000]
+    if "링커리어에서" in meta_text:  # 본문 없는 공고에 붙는 사이트 공통 문구
+        meta_text = ""
+    # 페이지 전체 텍스트는 쓰지 않는다: 본문이 이미지뿐인 공고에서 사이드바의
+    # 다른 공고·자소서 글이 섞여 키워드 오탐이 생긴다.
+    result.description = f"{meta_text} {result.description}".strip()
     return result
 
 

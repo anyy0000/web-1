@@ -1,10 +1,13 @@
 # 링커리어 크롤러 설정
-# 키워드/기관 목록은 자유롭게 추가·삭제하세요. (대소문자 무시, 부분일치)
+# 구글시트를 쓰면 아래 목록(기관/분야/키워드)은 첫 실행 때 시트 '설정' 탭으로 옮겨지고,
+# 그 뒤로는 시트의 '설정' 탭이 기준입니다. 여기 목록은 엑셀 전용 모드에서만 쓰입니다.
+# (대소문자 무시, 부분일치)
 
 crawl:
   pages_per_list: 5          # 목록 페이지를 몇 페이지까지 볼지 (최신순)
   request_delay_sec: 1.5     # 요청 간 대기 (서버 부담 줄이기)
   fetch_detail: true         # 상세 페이지 본문까지 읽어서 키워드 매칭
+  poster_ocr: true           # 본문이 거의 없는 공고는 포스터 이미지 글자를 무료 OCR로 읽음
   # 목록 URL 뒤에 붙는 쿼리. 실제 파라미터명은 사이트 확인 후 조정 필요
   list_query: "filterType=CATEGORY&orderBy_direction=DESC&orderBy_field=CREATED_AT"
   lists:

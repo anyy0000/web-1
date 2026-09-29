@@ -19,6 +19,8 @@ jobs:
           python-version: "3.11"
           cache: pip
           cache-dependency-path: linkareer-crawler/requirements.txt
+      - name: 포스터 OCR(무료) 설치
+        run: sudo apt-get update -q && sudo apt-get install -y -q tesseract-ocr tesseract-ocr-kor
       - run: pip install -r requirements.txt
       - name: 수집 실행
         env:

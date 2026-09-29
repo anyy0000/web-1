@@ -21,6 +21,7 @@ from crawler import KST, Activity, LinkareerClient
 from filters import RelevanceFilter
 from storage import ExcelStorage, SheetStorage, merge_rows
 from summarizer import Summarizer
+import ocr
 
 ROOT = Path(__file__).resolve().parent
 
@@ -50,11 +51,13 @@ def main() -> int:
         storages.append(ExcelStorage(args.excel))
     primary = storages[0] if storages else None  # 구글시트가 있으면 시트가 원본
     existing = primary.load_rows() if primary else []
-    settings = primary.load_settings() if primary else {}
+    if isinstance(primary, SheetStorage):
+        primary.seed_settings(config)
+    settings = primary.load_settings() if primary else None
     seen: set[str] = set().union(*(s.seen_ids() for s in storages)) if storages else set()
     print(f"기존 목록 {len(existing)}건, 이미 확인한 공고 {len(seen)}건")
-    if settings:
-        print("설정 탭:", ", ".join(f"{k} {len(v)}개" for k, v in settings.items()))
+    if settings is not None:
+        print("설정 탭 조건:", ", ".join(f"{k} {len(v)}개" for k, v in settings.items()) or "없음")
 
     client = LinkareerClient(
         delay_sec=crawl_cfg.get("request_delay_sec", 1.5),
@@ -62,7 +65,8 @@ def main() -> int:
     )
     relevance = RelevanceFilter(config, settings)
     summarizer = Summarizer(client, config)
-    print(f"요약 방식: {summarizer.mode}")
+    use_ocr = config.get("crawl", {}).get("poster_ocr", True) and ocr.available()
+    print(f"요약 방식: {summarizer.mode}, 포스터 OCR: {'사용' if use_ocr else '미설치/꺼짐'}")
 
     new_rows, seen_rows = [], []
     stats = {"목록": 0, "신규": 0, "추천": 0, "검토": 0, "제외": 0, "오류": 0}
@@ -88,6 +92,8 @@ def main() -> int:
                     print(f"  ! 상세 실패 {a.url}: {e}", file=sys.stderr)
                     stats["오류"] += 1
                     continue  # _seen 에 기록하지 않음 → 다음 실행 때 재시도
+                if use_ocr and ocr.needs_ocr(a):
+                    print(f"  · 포스터 OCR: {a.title[:30]} ({ocr.read_posters(client, a)}자)")
             if a.close_date and a.close_date < today:
                 seen_rows.append([a.id, today.isoformat(), "마감"])
                 continue
@@ -100,7 +106,7 @@ def main() -> int:
             print(f"  + [{m.label}] {a.title} / {a.organizer or '-'}")
             new_rows.append(to_row(a, m, summary, prepare, today))
 
-    backfill(existing, client, relevance, summarizer, config)
+    backfill(existing, client, relevance, summarizer, config, use_ocr)
     print("요약:", ", ".join(f"{k} {v}" for k, v in stats.items()))
 
     rows = merge_rows(existing, new_rows)
@@ -124,7 +130,7 @@ def to_row(a: Activity, m, summary: str, prepare: str, today) -> dict:
     }
 
 
-def backfill(rows: list[dict], client, relevance, summarizer, config) -> None:
+def backfill(rows: list[dict], client, relevance, summarizer, config, use_ocr: bool) -> None:
     """요약이 비어 있는 기존 행을 채우고, 추천이유를 현재 기준 문구로 갱신한다 (추천도는 유지)."""
     limit = config.get("summary", {}).get("backfill_per_run", 30)
     from storage import to_date
@@ -145,6 +151,8 @@ def backfill(rows: list[dict], client, relevance, summarizer, config) -> None:
         except Exception as e:  # noqa: BLE001 - 마감돼 내려간 공고 등
             print(f"  ! 상세 실패 {a.url}: {e}", file=sys.stderr)
             continue
+        if use_ocr and ocr.needs_ocr(a):
+            ocr.read_posters(client, a)
         m = relevance.evaluate(a)
         summary, prepare = summarizer.summarize(a)
         r["내용요약"], r["준비할 것"] = summary, prepare

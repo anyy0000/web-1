@@ -60,7 +60,8 @@ class Summarizer:
             except Exception as e:  # noqa: BLE001 - 요약 실패가 수집 전체를 막지 않도록
                 print(f"  ! 요약 실패 {a.url}: {type(e).__name__}: {e}")
                 return "", ""  # 비워 두면 다음 실행 때 다시 시도
-        return excerpt(a.description)
+        label = "(포스터 OCR)" if "[포스터 OCR]" in a.description else "(발췌)"
+        return excerpt(a.description.replace("[포스터 OCR]", " "), a.title, label)
 
     def _claude(self, a: Activity) -> tuple[str, str]:
         import anthropic
@@ -126,16 +127,67 @@ def _image_blocks(data: bytes) -> list[dict]:
     return blocks
 
 
-SUMMARY_HEADS = ["공모 주제", "공모주제", "주제", "공모 내용", "활동 내용", "활동내용", "모집 분야", "공모 분야", "개요"]
-PREPARE_HEADS = ["필수 제출", "제출물", "제출 규격", "제출 자료", "제출 서류", "제출서류", "제출 방법", "접수 방법", "지원 방법", "신청 방법", "응모 방법", "활동 혜택"]
+# 우선순위 순서. 앞쪽 항목이 있으면 그걸 쓴다.
+SUMMARY_KEYS = ["공모 주제", "공모주제", "주제", "공모 내용", "공모내용", "공모 부문", "공모부문", "공모 분야",
+                "모집 분야", "모집분야", "활동 내용", "활동내용", "주요 활동", "대회 소개", "행사 소개",
+                "프로그램 소개", "활동 소개", "사업 소개", "담당업무", "교육 내용", "개요", "소개"]
+PREPARE_KEYS = ["필수 제출", "제출물", "제출 서류", "제출서류", "제출 규격", "제출 자료", "출품 가이드", "출품 규격",
+                "참여 방법", "참가 방법", "응모 방법", "지원 방법", "접수 방법", "신청 방법", "활동 미션",
+                "주요 활동", "활동 내용", "선발 절차", "전형 절차", "지원 자격", "참가 자격", "모집 대상"]
+SECTION_RE = re.compile(r"[■◆◇▶▷●○□◎★☆✅✔❗▣◉]|【|\[|<|[\U0001F300-\U0001FAFF]")
+# 링커리어가 자동으로 붙이는 첫 문장 ("…입니다. 혜택으로는 … 등이 있습니다. …지원해주세요!")
+TEMPLATE_RE = re.compile(r"^.{0,200}?입니다\.\s*(?:혜택으로는[^.]{0,120}?있습니다\.\s*)?(?:[^.!]{0,80}?지원해\s?주세요[!.]\s*)?")
+MAX_EXCERPT = 180
+URL_RE = re.compile(r"https?://\S+")
 
 
-def excerpt(text: str) -> tuple[str, str]:
-    """본문에서 항목 제목 뒤 문장을 잘라온다. 정확도는 낮지만 무료."""
-    def grab(heads: list[str]) -> str:
-        for h in heads:
-            m = re.search(re.escape(h) + r"\s*[:：]?\s*(.{10,160}?)(?:\s[■◆▶●○□※•]|$)", text)
-            if m:
-                return "(발췌) " + m.group(1).strip()
+def excerpt(text: str, title: str = "", label: str = "(발췌)") -> tuple[str, str]:
+    """본문을 ■, [ ] 같은 제목 단위로 나눠 '주제'와 '제출/참여 방법' 항목을 찾는다 (무료, 규칙 기반)."""
+    body = TEMPLATE_RE.sub("", text, count=1).strip()
+    if title and body.startswith(title):
+        body = body[len(title):].strip()
+    sections = []
+    for seg in SECTION_RE.split(body):
+        seg = seg.strip(" :：-]】>")
+        if seg:
+            sections.append(seg)
+
+    def find(keys: list[str], skip: str = "") -> str:
+        for key in keys:
+            for seg in sections:
+                head = seg[:len(key) + 4]
+                if key in head:
+                    content = seg[seg.index(key) + len(key):].lstrip(" :：]】>-")
+                    if len(URL_RE.sub("", content).strip()) >= 8 and content != skip:
+                        return _clip(content)
         return ""
-    return grab(SUMMARY_HEADS), grab(PREPARE_HEADS)
+
+    def find_anywhere(keys: list[str], skip: str = "") -> str:  # OCR 글처럼 구분 기호가 없는 경우
+        flat = URL_RE.sub(" ", body)
+        for key in keys:
+            for variant in {key, key.replace(" ", "")}:
+                i = flat.find(variant)
+                if i >= 0:
+                    content = flat[i + len(variant):].lstrip(" :：]】>-")
+                    if len(content) >= 8 and _clip(content) != skip:
+                        return _clip(content)
+        return ""
+
+    summary = find(SUMMARY_KEYS) or find_anywhere(SUMMARY_KEYS[:8])
+    prepare = find(PREPARE_KEYS, skip=summary) or find_anywhere(PREPARE_KEYS[:14], skip=summary)
+    flat_body = URL_RE.sub(" ", body).strip()
+    if not summary and len(flat_body) >= 30:  # 제목 항목이 없으면 본문 앞부분
+        summary = _clip(flat_body)
+    return (f"{label} {summary}" if summary else "", f"{label} {prepare}" if prepare else "")
+
+
+def _clip(text: str) -> str:
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) <= MAX_EXCERPT:
+        return text
+    cut = text[:MAX_EXCERPT]
+    for mark in (". ", "다. ", " - ", " • ", " "):
+        i = cut.rfind(mark)
+        if i > MAX_EXCERPT * 0.5:
+            return cut[:i + len(mark)].strip() + "…"
+    return cut + "…"
