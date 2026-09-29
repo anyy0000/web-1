@@ -43,6 +43,7 @@ class Activity:
     close_date: date | None = None
     view_count: int | None = None
     description: str = ""
+    image_urls: list[str] = field(default_factory=list)  # 포스터 + 본문 이미지
 
     @property
     def url(self) -> str:
@@ -59,6 +60,7 @@ class Activity:
         self.view_count = self.view_count if self.view_count is not None else other.view_count
         if len(other.description) > len(self.description):
             self.description = other.description
+        self.image_urls = self.image_urls or other.image_urls
 
 
 class LinkareerClient:
@@ -99,6 +101,12 @@ class LinkareerClient:
                 else:
                     found[a.id] = a
         return list(found.values())
+
+    def get_bytes(self, url: str) -> tuple[bytes, str]:
+        """이미지 다운로드 (CDN이라 요청 간격 제한 없음)."""
+        resp = self.session.get(url, timeout=30)
+        resp.raise_for_status()
+        return resp.content, resp.headers.get("content-type", "")
 
     def enrich(self, activity: Activity) -> None:
         """상세 페이지에서 주최사/마감일/본문을 보강한다."""
@@ -220,6 +228,16 @@ def _to_activity(d: dict, refs: dict, kind: str) -> Activity:
     desc = _resolve(desc, refs)
     if isinstance(desc, dict):
         desc = _first(desc, "text", "content") or ""
+    images = []
+    for f in d.get("files") or []:  # 파일 유형 2 = 포스터
+        f = _resolve(f, refs)
+        if isinstance(f, dict) and f.get("url") and (f.get("type") or {}).get("__ref", "").endswith(":2"):
+            images.append(f["url"])
+    if not images:
+        thumb = _resolve(d.get("thumbnailImage") or {}, refs)
+        if isinstance(thumb, dict) and thumb.get("url"):
+            images.append(thumb["url"])
+    images += [u for u in re.findall(r'<img[^>]+src="([^"]+)"', str(desc)) if u.startswith("http")]
     views = _first(d, "viewCount", "views")
     reward = d.get("tenThousandUnitOfReward")
     return Activity(
@@ -233,6 +251,7 @@ def _to_activity(d: dict, refs: dict, kind: str) -> Activity:
         close_date=_to_date(_first(d, "recruitCloseAt", "closeAt", "endAt", "deadline", "dueDate")),
         view_count=int(views) if isinstance(views, (int, float)) else None,
         description=BeautifulSoup(str(desc), "html.parser").get_text(" ", strip=True)[:8000],
+        image_urls=images,
     )
 
 
