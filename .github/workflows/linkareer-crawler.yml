@@ -6,9 +6,14 @@ on:
     - cron: "47 23 * * 0,3"
   workflow_dispatch: {}  # Actions 탭에서 수동 실행
 
+concurrency:  # 두 번 눌러도 동시에 돌지 않게 (시트를 동시에 덮어쓰는 것 방지)
+  group: linkareer-crawler
+  cancel-in-progress: false
+
 jobs:
   crawl:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     defaults:
       run:
         working-directory: linkareer-crawler

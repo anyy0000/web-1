@@ -43,6 +43,7 @@ SCHEMA = {
     "additionalProperties": False,
 }
 GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta"
+DEFAULT_GEMINI_MODELS = ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-flash-latest", "gemini-flash-lite-latest"]
 GEMINI_SCHEMA = {  # Gemini responseSchema 형식 (OpenAPI 부분집합)
     "type": "OBJECT",
     "properties": {k: {"type": "STRING"} for k in ("summary", "prepare", "target")},
@@ -50,8 +51,8 @@ GEMINI_SCHEMA = {  # Gemini responseSchema 형식 (OpenAPI 부분집합)
 }
 
 
-class QuotaExhausted(Exception):
-    """무료 한도 소진. 이번 실행의 나머지는 무료 발췌로 채운다."""
+class LLMUnavailable(Exception):
+    """키로 쓸 수 있는 모델이 없음(결제 필요·권한 없음·한도 소진). 이번 실행의 나머지는 무료 발췌로 채운다."""
 
 
 class Summarizer:
@@ -63,7 +64,8 @@ class Summarizer:
         self.used = 0
         self.llm = None
         self.gemini_key = os.environ.get("GEMINI_API_KEY", "").strip()
-        self.gemini_models = list(cfg.get("gemini_models", ["gemini-flash-latest", "gemini-2.5-flash"]))
+        self.gemini_models = list(cfg.get("gemini_models", DEFAULT_GEMINI_MODELS))
+        self._discovered = False
         self.gemini_interval = float(cfg.get("gemini_interval_sec", 7))  # 무료 등급 분당 요청 제한 대비
         self._gemini_model: str | None = None
         self._last_call = 0.0
@@ -85,17 +87,18 @@ class Summarizer:
         return f"Claude({self.model})" if self.llm else "본문 발췌(무료)"
 
     def summarize(self, a: Activity) -> tuple[str, str, str]:
-        """(내용요약, 준비할 것, 참가대상)"""
+        """(내용요약, 준비할 것, 참가대상). AI 요약이 실패하면 빈칸 대신 무료 발췌로 채운다."""
         if self.llm and self.used < self.max_per_run:
             self.used += 1
             try:
-                return self._gemini(a) if self.llm == "gemini" else self._claude(a)
-            except QuotaExhausted as e:
-                print(f"  ! Gemini 무료 한도 소진 → 이번 실행은 발췌로 채움 ({e})")
+                result = self._gemini(a) if self.llm == "gemini" else self._claude(a)
+                if result[0]:
+                    return result
+            except LLMUnavailable as e:
+                print(f"  ! AI 요약을 쓸 수 없어 이번 실행은 발췌로 채웁니다: {e}")
                 self.llm = None
-            except Exception as e:  # noqa: BLE001 - 요약 실패가 수집 전체를 막지 않도록
+            except Exception as e:  # noqa: BLE001 - 이 공고만 발췌로
                 print(f"  ! 요약 실패 {a.url}: {type(e).__name__}: {str(e)[:200]}")
-                return "", "", ""  # 비워 두면 다음 실행 때 다시 시도
         label = "(포스터 OCR)" if "[포스터 OCR]" in a.description else "(발췌)"
         summary, prepare = excerpt(a.description.replace("[포스터 OCR]", " "), a.title, label)
         return summary, prepare, ", ".join(a.targets)
@@ -129,46 +132,63 @@ class Summarizer:
         return tuple(str(out.get(k, "")).strip() for k in ("summary", "prepare", "target"))
 
     def _gemini_call(self, body: dict) -> dict:
-        headers = {"x-goog-api-key": self.gemini_key}
-        models = [self._gemini_model] if self._gemini_model else self.gemini_models
-        for attempt in range(2):
-            for model in models:
-                wait = self.gemini_interval - (time.monotonic() - self._last_call)
-                if wait > 0:
-                    time.sleep(wait)
-                self._last_call = time.monotonic()
-                r = requests.post(f"{GEMINI_BASE}/models/{model}:generateContent",
-                                  headers=headers, json=body, timeout=90)
-                if r.status_code == 200:
-                    if self._gemini_model != model:
-                        print(f"  · Gemini 모델: {model}")
-                    self._gemini_model = model
-                    return r.json()
-                if r.status_code == 404:  # 모델 이름이 바뀌었거나 없어짐 → 다음 후보
-                    continue
-                if r.status_code == 429:
-                    if attempt == 0:
-                        time.sleep(40)  # 분당 한도일 수 있으니 한 번 쉬었다가 재시도
-                        break
-                    raise QuotaExhausted(r.text[:200])
-                r.raise_for_status()
-            else:
-                discovered = self._discover_flash_model()
-                if not discovered or discovered in models:
-                    raise RuntimeError("사용 가능한 Gemini Flash 모델을 찾지 못했습니다")
-                models = [discovered]
-        raise QuotaExhausted("재시도 후에도 한도 초과")
+        """모델 후보를 차례로 시도한다. 402(결제 필요)·403(권한)·404(없는 모델)·429(한도)는 다음 후보로.
+        모든 후보가 안 되면 LLMUnavailable → 이번 실행은 발췌로 대체."""
+        candidates = [self._gemini_model] if self._gemini_model else list(self.gemini_models)
+        tried: set[str] = set()
+        errors: list[str] = []
+        waited_for_rate = False
+        while candidates:
+            model = candidates.pop(0)
+            if model in tried:
+                continue
+            tried.add(model)
+            r = self._gemini_post(model, body)
+            if r.status_code == 200:
+                if self._gemini_model != model:
+                    print(f"  · Gemini 모델: {model}")
+                self._gemini_model = model
+                return r.json()
+            if r.status_code == 429 and not waited_for_rate:  # 분당 한도일 수 있으니 한 번 쉬고 재시도
+                waited_for_rate = True
+                time.sleep(40)
+                tried.discard(model)
+                candidates.insert(0, model)
+                continue
+            if r.status_code in (402, 403, 404, 429):
+                errors.append(f"{model} → {r.status_code} {_gemini_error(r)}")
+                if self._gemini_model == model:
+                    self._gemini_model = None
+                if not candidates and not self._discovered:
+                    candidates += [m for m in self._discover_flash_models() if m not in tried]
+                continue
+            r.raise_for_status()  # 400/5xx: 이 공고만 실패 처리
+        raise LLMUnavailable(" / ".join(errors[-3:]) or "사용 가능한 모델 없음")
 
-    def _discover_flash_model(self) -> str | None:
-        """설정한 모델이 모두 없으면, API에 모델 목록을 물어 최신 Flash 모델을 고른다."""
-        r = requests.get(f"{GEMINI_BASE}/models", headers={"x-goog-api-key": self.gemini_key},
-                         params={"pageSize": 200}, timeout=30)
-        r.raise_for_status()
+    def _gemini_post(self, model: str, body: dict) -> requests.Response:
+        wait = self.gemini_interval - (time.monotonic() - self._last_call)
+        if wait > 0:
+            time.sleep(wait)
+        self._last_call = time.monotonic()
+        return requests.post(f"{GEMINI_BASE}/models/{model}:generateContent",
+                             headers={"x-goog-api-key": self.gemini_key}, json=body, timeout=90)
+
+    def _discover_flash_models(self) -> list[str]:
+        """설정한 모델이 모두 안 되면 API에 모델 목록을 물어 Flash 계열 후보를 만든다 (실행당 1회)."""
+        self._discovered = True
+        try:
+            r = requests.get(f"{GEMINI_BASE}/models", headers={"x-goog-api-key": self.gemini_key},
+                             params={"pageSize": 200}, timeout=30)
+            r.raise_for_status()
+        except requests.RequestException as e:
+            print(f"  ! Gemini 모델 목록 조회 실패: {e}")
+            return []
         names = [m["name"].split("/", 1)[-1] for m in r.json().get("models", [])
                  if "generateContent" in m.get("supportedGenerationMethods", [])
-                 and "flash" in m["name"] and not any(x in m["name"] for x in ("lite", "image", "tts", "live", "exp"))]
-        names.sort(key=lambda n: ("preview" in n, [-int(x) for x in re.findall(r"\d+", n)[:2]]))
-        return names[0] if names else None
+                 and "flash" in m["name"] and not any(x in m["name"] for x in ("image", "tts", "live", "exp"))]
+        # 정식 버전 → 최신 버전 → lite 순
+        names.sort(key=lambda n: ("preview" in n, "lite" in n, [-int(x) for x in re.findall(r"\d+", n)[:2]]))
+        return names[:4]
 
     # ------------------------------------------------------------------ Claude
 
@@ -208,6 +228,13 @@ class Summarizer:
         except json.JSONDecodeError:
             return "", "", ""
         return tuple(str(data.get(k, "")).strip() for k in ("summary", "prepare", "target"))
+
+
+def _gemini_error(r: requests.Response) -> str:
+    try:
+        return str(r.json().get("error", {}).get("message", ""))[:160]
+    except ValueError:
+        return r.text[:160]
 
 
 def _post_text(a: Activity) -> str:
