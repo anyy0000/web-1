@@ -138,6 +138,7 @@ SECTION_RE = re.compile(r"[■◆◇▶▷●○□◎★☆✅✔❗▣◉]|【
 # 링커리어가 자동으로 붙이는 첫 문장 ("…입니다. 혜택으로는 … 등이 있습니다. …지원해주세요!")
 TEMPLATE_RE = re.compile(r"^.{0,200}?입니다\.\s*(?:혜택으로는[^.]{0,120}?있습니다\.\s*)?(?:[^.!]{0,80}?지원해\s?주세요[!.]\s*)?")
 MAX_EXCERPT = 180
+MIN_EXCERPT = 25  # 이보다 짧으면("릴스 서포터즈 10명") 다음 항목을 찾는다
 URL_RE = re.compile(r"https?://\S+")
 
 
@@ -152,32 +153,43 @@ def excerpt(text: str, title: str = "", label: str = "(발췌)") -> tuple[str, s
         if seg:
             sections.append(seg)
 
+    def after_key(text: str, key: str) -> str | None:
+        """key 바로 뒤가 글자로 이어지면('주제로 진행…') 제목이 아니라 문장 속 단어이므로 버린다."""
+        i = text.find(key)
+        while i >= 0:
+            rest = text[i + len(key):]
+            if not rest or not ("가" <= rest[0] <= "힣"):
+                return rest.lstrip(" :：]】>-)")
+            i = text.find(key, i + 1)
+        return None
+
+    def good(content: str | None, skip: str) -> str:
+        if content is None:
+            return ""
+        clipped = _clip(URL_RE.sub(" ", content))
+        return clipped if len(clipped) >= MIN_EXCERPT and clipped != skip else ""
+
     def find(keys: list[str], skip: str = "") -> str:
         for key in keys:
             for seg in sections:
-                head = seg[:len(key) + 4]
-                if key in head:
-                    content = seg[seg.index(key) + len(key):].lstrip(" :：]】>-")
-                    if len(URL_RE.sub("", content).strip()) >= 8 and content != skip:
-                        return _clip(content)
+                if key in seg[:len(key) + 4]:
+                    found = good(after_key(seg, key), skip)
+                    if found:
+                        return found
         return ""
 
     def find_anywhere(keys: list[str], skip: str = "") -> str:  # OCR 글처럼 구분 기호가 없는 경우
-        flat = URL_RE.sub(" ", body)
         for key in keys:
             for variant in {key, key.replace(" ", "")}:
-                i = flat.find(variant)
-                if i >= 0:
-                    content = flat[i + len(variant):].lstrip(" :：]】>-")
-                    if len(content) >= 8 and _clip(content) != skip:
-                        return _clip(content)
+                found = good(after_key(body, variant), skip)
+                if found:
+                    return found
         return ""
 
     summary = find(SUMMARY_KEYS) or find_anywhere(SUMMARY_KEYS[:8])
     prepare = find(PREPARE_KEYS, skip=summary) or find_anywhere(PREPARE_KEYS[:14], skip=summary)
-    flat_body = URL_RE.sub(" ", body).strip()
-    if not summary and len(flat_body) >= 30:  # 제목 항목이 없으면 본문 앞부분
-        summary = _clip(flat_body)
+    if not summary:  # 제목 항목이 없으면 본문 앞부분
+        summary = good(body, "")
     return (f"{label} {summary}" if summary else "", f"{label} {prepare}" if prepare else "")
 
 
