@@ -19,7 +19,7 @@ import yaml
 
 from crawler import KST, Activity, LinkareerClient
 from filters import RelevanceFilter
-from storage import ExcelStorage, SheetStorage, merge_rows
+from storage import ExcelStorage, SheetStorage, merge_rows, to_date
 from summarizer import Summarizer
 import ocr
 
@@ -110,6 +110,13 @@ def main() -> int:
     print("요약:", ", ".join(f"{k} {v}" for k, v in stats.items()))
 
     rows = merge_rows(existing, new_rows)
+    # 마감일이 지난 공고는 목록에서 뺀다 (_seen 에 남겨 다시 들어오지 않게)
+    expired = [r for r in rows if (d := to_date(r.get("마감일"))) and d < today]
+    if expired:
+        expired_ids = {r["ID"] for r in expired}
+        rows = [r for r in rows if r["ID"] not in expired_ids]
+        seen_rows += [[r["ID"], today.isoformat(), "마감(목록에서 삭제)"] for r in expired]
+        print(f"마감 지난 공고 {len(expired)}건 삭제")
     for s in storages:
         s.save(rows, seen_rows)
         print(f"저장 완료: {type(s).__name__} (신규 {len(new_rows)}건, 전체 {len(rows)}건)")
@@ -133,10 +140,8 @@ def to_row(a: Activity, m, summary: str, prepare: str, target: str, today) -> di
 def backfill(rows: list[dict], client, relevance, summarizer, config, use_ocr: bool) -> None:
     """요약이 비어 있는 기존 행을 채우고, 추천이유를 현재 기준 문구로 갱신한다 (추천도는 유지)."""
     limit = config.get("summary", {}).get("backfill_per_run", 30)
-    from storage import to_date
-
     today = datetime.now(KST).date()
-    def needs(r):  # 요약이 없거나, 무료 발췌만 있는데 지금은 Claude를 쓸 수 있는 경우
+    def needs(r):  # 요약이 없거나, 무료 발췌만 있는데 지금은 AI 요약을 쓸 수 있는 경우
         text = str(r.get("내용요약", "")).strip()
         return not text or (summarizer.uses_llm and text.startswith(("(발췌)", "(포스터 OCR)")))
 
@@ -155,7 +160,9 @@ def backfill(rows: list[dict], client, relevance, summarizer, config, use_ocr: b
             ocr.read_posters(client, a)
         m = relevance.evaluate(a)
         summary, prepare, target = summarizer.summarize(a)
-        r["내용요약"], r["준비할 것"], r["참가대상"] = summary, prepare, target
+        for key, value in (("내용요약", summary), ("준비할 것", prepare), ("참가대상", target)):
+            if value:  # 새 값이 비면 기존 값을 지우지 않는다
+                r[key] = value
         r["추천이유"] = " / ".join(m.reasons)
         for key, value in (("기관유형", a.organization_type), ("분야", ", ".join(a.categories)),
                            ("시상(만원)", a.reward or "")):

@@ -8,6 +8,7 @@ JSON에서 못 찾으면 HTML의 /activity/{id} 링크 + 상세 페이지 메타
 
 from __future__ import annotations
 
+import html
 import json
 import re
 import time
@@ -236,7 +237,7 @@ def _to_activity(d: dict, refs: dict, kind: str) -> Activity:
         thumb = _resolve(d.get("thumbnailImage") or {}, refs)
         if isinstance(thumb, dict) and thumb.get("url"):
             images.append(thumb["url"])
-    images += [u for u in re.findall(r'<img[^>]+src="([^"]+)"', str(desc)) if u.startswith("http")]
+    images += [html.unescape(u) for u in re.findall(r'<img[^>]+src="([^"]+)"', str(desc)) if u.startswith("http")]
     views = _first(d, "viewCount", "views")
     reward = d.get("tenThousandUnitOfReward")
     return Activity(

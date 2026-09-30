@@ -14,6 +14,8 @@ import os
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
+from crawler import KST
+
 HEADER = ["구분", "D-day", "추천도", "제목", "주최", "기관유형", "분야", "마감일",
           "내용요약", "준비할 것", "참가대상", "추천이유", "시상(만원)", "링크", "상태", "메모", "수집일", "ID"]
 RENAMED = {"매칭근거": "추천이유"}  # 이전 버전 열 이름
@@ -80,12 +82,13 @@ def rows_from_table(values: list[list]) -> list[dict]:
     return rows
 
 
-def build_table(rows: list[dict]) -> tuple[list[str], list[list]]:
+def build_table(rows: list[dict], today: date | None = None) -> tuple[list[str], list[list]]:
     extra = []  # 사용자가 직접 추가한 열
     for r in rows:
         extra += [k for k in r if k not in HEADER and k not in extra]
     header = HEADER + extra
-    far, today = date(9999, 12, 31), date.today()
+    far = date(9999, 12, 31)
+    today = today or datetime.now(KST).date()
 
     def sort_key(r):  # 구분 → 진행 중(D-day 가까운 순) → 마감된 것은 맨 아래
         d = to_date(r.get("마감일")) or far
@@ -213,7 +216,7 @@ class SheetStorage:
                 if isinstance(v, date):
                     line[i] = v.isoformat()
         self.ws.resize(rows=max(self.ws.row_count, len(table) + 50), cols=max(self.ws.col_count, len(header)))
-        self.ws.batch_clear(["A2:ZZ"])
+        self.ws.batch_clear(["A1:ZZ"])
         self.ws.update([header] + table, "A1", value_input_option="USER_ENTERED")
         if seen:
             self.seen_ws.append_rows(seen, value_input_option="RAW")
