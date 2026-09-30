@@ -179,3 +179,86 @@ def build_requests(sheet_id: int, header: list[str], banding_ids: list[int],
             "condition": {"type": "ONE_OF_LIST", "values": [{"userEnteredValue": v} for v in STATUS_OPTIONS]},
             "showCustomUi": True, "strict": False}}})
     return reqs
+
+
+# ---------------------------------------------------------------- 공통 도우미 (다른 탭용)
+def table_requests(sheet_id: int, columns: list[tuple[int, str, str, bool]], header_row: int = 0,
+                   first_col: int = 0, last_row: int | None = None, banding: bool = True) -> list[dict]:
+    """columns: (너비, 정렬, 줄바꿈 CLIP/WRAP, 굵게) 를 first_col 부터 차례로. 머리글·본문·줄무늬 서식 요청."""
+    reqs: list[dict] = []
+    end_col = first_col + len(columns)
+
+    def g(c0, c1, r0, r1=None):
+        d = {"sheetId": sheet_id, "startRowIndex": r0, "startColumnIndex": c0, "endColumnIndex": c1}
+        if r1 is not None:
+            d["endRowIndex"] = r1
+        return d
+
+    body_end = last_row
+    reqs.append({"repeatCell": {"range": g(first_col, end_col, header_row, header_row + 1), "cell": {"userEnteredFormat": {
+        "backgroundColor": HEADER_BG, "horizontalAlignment": "CENTER", "verticalAlignment": "MIDDLE", "wrapStrategy": "WRAP",
+        "textFormat": {"foregroundColor": HEADER_FG, "bold": True, "fontFamily": FONT, "fontSize": 10}}},
+        "fields": "userEnteredFormat.backgroundColor,userEnteredFormat.horizontalAlignment,"
+                  "userEnteredFormat.verticalAlignment,userEnteredFormat.wrapStrategy,userEnteredFormat.textFormat"}})
+    for k, (width, align, wrap, bold) in enumerate(columns):
+        c = first_col + k
+        reqs.append({"updateDimensionProperties": {"range": {"sheetId": sheet_id, "dimension": "COLUMNS",
+                                                             "startIndex": c, "endIndex": c + 1},
+                                                   "properties": {"pixelSize": width}, "fields": "pixelSize"}})
+        reqs.append({"repeatCell": {"range": g(c, c + 1, header_row + 1, body_end), "cell": {"userEnteredFormat": {
+            "horizontalAlignment": align, "verticalAlignment": "MIDDLE", "wrapStrategy": wrap,
+            "padding": {"top": 4, "bottom": 4, "left": 6, "right": 6},
+            "textFormat": {"fontFamily": FONT, "fontSize": 10, "bold": bold}}},
+            "fields": "userEnteredFormat.horizontalAlignment,userEnteredFormat.verticalAlignment,"
+                      "userEnteredFormat.wrapStrategy,userEnteredFormat.padding,userEnteredFormat.textFormat.fontFamily,"
+                      "userEnteredFormat.textFormat.fontSize,userEnteredFormat.textFormat.bold"}})
+    if banding:
+        reqs.append({"addBanding": {"bandedRange": {"range": g(first_col, end_col, header_row, body_end),
+                                                    "rowProperties": {"headerColor": HEADER_BG, "firstBandColor": BAND_1,
+                                                                      "secondBandColor": BAND_2}}}})
+    return reqs
+
+
+def text_rule(sheet_id: int, col: int, formula: str, bg: str | None, fg: str | None, bold: bool = False,
+              end_col: int | None = None, index: int = 0) -> dict:
+    fmt: dict = {}
+    if bg:
+        fmt["backgroundColor"] = rgb(bg)
+    tf: dict = {"bold": True} if bold else {}
+    if fg:
+        tf["foregroundColor"] = rgb(fg)
+    if tf:
+        fmt["textFormat"] = tf
+    return {"addConditionalFormatRule": {"index": index, "rule": {
+        "ranges": [{"sheetId": sheet_id, "startRowIndex": 1, "startColumnIndex": col,
+                    "endColumnIndex": end_col or col + 1}],
+        "booleanRule": {"condition": {"type": "CUSTOM_FORMULA", "values": [{"userEnteredValue": formula}]},
+                        "format": fmt}}}}
+
+
+SETTING_KIND_COLORS = {  # 설정 탭 '구분' 색: 가점(파랑·초록·노랑) / 감점·제외(빨강)
+    "관심기업": ("#E8F0FE", "#1A56B8"), "관심분야": ("#D5F0DD", "#0D652D"), "참고분야": ("#E6F4EA", "#137333"),
+    "주최키워드": ("#FEF7E0", "#8A5A00"), "키워드": ("#FEF7E0", "#8A5A00"),
+    "제외키워드": ("#FCE8E6", "#C5221F"), "제외기업": ("#FCE8E6", "#C5221F"),
+}
+
+
+def build_settings_requests(sheet_id: int, guide_rows: int, kinds: list[str]) -> list[dict]:
+    """'설정' 탭: 왼쪽 조건 목록(A~C) + 오른쪽 설명 표(E~G). 처음 만들 때 한 번 적용."""
+    reqs = [{"updateSheetProperties": {"properties": {"sheetId": sheet_id, "gridProperties": {"frozenRowCount": 1}},
+                                       "fields": "gridProperties.frozenRowCount"}},
+            {"updateDimensionProperties": {"range": {"sheetId": sheet_id, "dimension": "ROWS", "startIndex": 0,
+                                                     "endIndex": 1}, "properties": {"pixelSize": 36}, "fields": "pixelSize"}}]
+    reqs += table_requests(sheet_id, [(96, "CENTER", "CLIP", True), (220, "LEFT", "WRAP", False),
+                                      (200, "LEFT", "WRAP", False)])
+    reqs.append({"updateDimensionProperties": {"range": {"sheetId": sheet_id, "dimension": "COLUMNS", "startIndex": 3,
+                                                         "endIndex": 4}, "properties": {"pixelSize": 24}, "fields": "pixelSize"}})
+    reqs += table_requests(sheet_id, [(110, "CENTER", "WRAP", True), (130, "CENTER", "WRAP", False),
+                                      (460, "LEFT", "WRAP", False)], first_col=4, last_row=guide_rows)
+    for i, (kind, (bg, fg)) in enumerate(SETTING_KIND_COLORS.items()):
+        reqs.append(text_rule(sheet_id, 0, f'=$A2="{kind}"', bg, fg, bold=True, index=i))
+    reqs.append({"setDataValidation": {"range": {"sheetId": sheet_id, "startRowIndex": 1, "startColumnIndex": 0,
+                                                 "endColumnIndex": 1}, "rule": {
+        "condition": {"type": "ONE_OF_LIST", "values": [{"userEnteredValue": k} for k in kinds]},
+        "showCustomUi": True, "strict": False}}})
+    return reqs

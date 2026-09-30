@@ -194,6 +194,13 @@ class SheetStorage:
         self.settings_ws.clear()
         self.settings_ws.update(table, "A1", value_input_option="RAW")
         self.settings_ws.freeze(rows=1)
+        try:  # 처음 만들 때 한 번 서식 적용 (sheet_format.build_settings_requests)
+            from sheet_format import build_settings_requests
+
+            self.sh.batch_update({"requests": build_settings_requests(
+                self.settings_ws.id, len(GUIDE), list(SETTING_KINDS))})
+        except Exception as e:  # noqa: BLE001
+            print(f"  ! 설정 탭 서식 적용 실패: {e}")
         print(f"설정 탭 초기화: 조건 {len(rows)}개 + 설명 표")
 
     def load_rows(self) -> list[dict]:
