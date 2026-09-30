@@ -220,6 +220,21 @@ class SheetStorage:
         self.ws.update([header] + table, "A1", value_input_option="USER_ENTERED")
         if seen:
             self.seen_ws.append_rows(seen, value_input_option="RAW")
+        self.apply_format(header)
+
+    def apply_format(self, header: list[str]) -> None:
+        """가독성 서식(sheet_format.py)을 다시 건다. 기존 줄무늬·조건부 서식은 지우고 새로 걸어 중복되지 않게 한다."""
+        from sheet_format import build_requests
+
+        try:
+            meta = self.sh.fetch_sheet_metadata(params={
+                "fields": "sheets.properties.sheetId,sheets.bandedRanges.bandedRangeId,sheets.conditionalFormats.ranges.sheetId"})
+            info = next(x for x in meta["sheets"] if x["properties"]["sheetId"] == self.ws.id)
+            banding = [b["bandedRangeId"] for b in info.get("bandedRanges", [])]
+            n_cond = len(info.get("conditionalFormats", []))
+            self.sh.batch_update({"requests": build_requests(self.ws.id, header, banding, n_cond)})
+        except Exception as e:  # noqa: BLE001 - 서식 실패가 데이터 저장을 막지 않도록
+            print(f"  ! 시트 서식 적용 실패(데이터는 저장됨): {type(e).__name__}: {e}")
 
 
 class ExcelStorage:
