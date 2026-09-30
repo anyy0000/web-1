@@ -14,11 +14,15 @@ crawl:
     공모전: /list/contest
     대외활동: /list/activity
 
-# 요약 설정. ANTHROPIC_API_KEY 가 없으면 본문 발췌(무료)로 동작
+# 요약 설정. GEMINI_API_KEY(무료) → ANTHROPIC_API_KEY(유료) → 본문 발췌 순으로 사용
 summary:
+  gemini_models:             # 앞에서부터 시도. 이름이 바뀌어 없으면 API에서 최신 Flash 모델을 찾아 씀
+    - gemini-flash-latest
+    - gemini-2.5-flash
+  gemini_interval_sec: 7     # 무료 등급 분당 요청 제한 대비 요청 간격
   use_claude: true
   model: claude-opus-5-5     # 더 저렴하게: claude-haiku-4-5 (정확도는 다소 낮음)
-  max_per_run: 40            # 한 번 실행에 Claude 요약 최대 건수 (비용 상한)
+  max_per_run: 40            # 한 번 실행에 AI 요약 최대 건수 (무료 한도·비용 상한)
   backfill_per_run: 30       # 요약이 빈 기존 행을 한 번에 몇 건까지 채울지
 
 # 링커리어 분야가 이 중 하나면 +4점(단독으로 추천). 시트 '설정' 탭의 '관심분야'로도 추가 가능
