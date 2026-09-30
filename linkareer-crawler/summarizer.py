@@ -1,7 +1,9 @@
-"""공고 내용 요약: "무엇에 대한 공모전인지"와 "무엇을 준비해야 하는지".
+"""공고 내용 요약: 무엇에 대한 공모전인지 / 무엇을 준비해야 하는지 / 누가 지원할 수 있는지.
 
-- ANTHROPIC_API_KEY 가 있으면 Claude가 포스터 이미지 + 본문을 읽고 요약한다 (유료, 건당 수십 원).
-- 없으면 본문에서 '주제', '제출물' 같은 항목 근처 문장을 잘라 넣는다 (무료, 포스터만 있는 공고는 비어 있음).
+우선순위
+1. GEMINI_API_KEY 가 있으면 Gemini(무료 등급 Flash)가 포스터 이미지 + 본문을 읽고 짧은 문장으로 정리
+2. ANTHROPIC_API_KEY 가 있으면 Claude가 같은 방식으로 정리 (유료)
+3. 둘 다 없거나 한도 초과면 본문에서 '주제', '제출물' 같은 항목을 잘라 넣는다 (무료 발췌)
 """
 
 from __future__ import annotations
@@ -11,6 +13,9 @@ import io
 import json
 import os
 import re
+import time
+
+import requests
 
 from crawler import Activity, LinkareerClient
 
@@ -18,21 +23,35 @@ MAX_IMAGES = 4          # 한 공고당 모델에 보내는 이미지 조각 수
 MAX_LONG_EDGE = 1568    # 이보다 크면 모델 쪽에서 어차피 축소됨
 MAX_TEXT_CHARS = 6000
 
-SYSTEM_PROMPT = """너는 식품영양학과 대학생이 공모전·대외활동을 고르는 것을 돕는다.
-공고 포스터 이미지와 본문을 읽고 한국어로 짧게 정리한다.
-- summary: 무엇에 대한 공모전/활동인지 (주제, 목적, 누가 주최하는 어떤 성격인지). 2문장 이내.
-- prepare: 지원자가 실제로 준비·제출해야 하는 것 (예: 기획서 5p, 1분 영상, 레시피+사진, 서류/면접, 활동 기간 중 SNS 콘텐츠 월 2회). 1~2문장.
-공고에 없는 내용은 추측하지 말고 "공고에 명시 없음"이라고 쓴다."""
+SYSTEM_PROMPT = """너는 식품영양학과 대학생이 공모전·대외활동 목록을 훑어보며 고르는 것을 돕는다.
+공고 포스터 이미지와 본문을 읽고, 스프레드시트 한 칸에 들어갈 만큼 짧고 쉬운 한국어로 정리한다.
+- summary: 무엇을 하는 공모전/활동인지 한 문장. 50자 이내, 명사형으로 끝낸다.
+  예) "국내산 양식 수산물로 만든 요리를 겨루는 대회", "당근잎차 브랜드 SNS 콘텐츠를 만드는 서포터즈"
+- prepare: 지원할 때(또는 선발 후 활동으로) 실제로 해야 하는 일. 50자 이내.
+  예) "요리 과정 영상(10분 이내) + 완성 사진 제출", "지원서 제출 후 4주간 릴스 제작"
+- target: 참가 대상. 20자 이내. 예) "대학생", "누구나", "4학년 이상 재학·졸업생", "초등학생"
+날짜·상금·문의처는 다른 칸에 있으니 넣지 않는다. 공고에 없는 내용은 추측하지 말고 "공고에 명시 없음"이라고 쓴다."""
 
 SCHEMA = {
     "type": "object",
     "properties": {
         "summary": {"type": "string"},
         "prepare": {"type": "string"},
+        "target": {"type": "string"},
     },
-    "required": ["summary", "prepare"],
+    "required": ["summary", "prepare", "target"],
     "additionalProperties": False,
 }
+GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta"
+GEMINI_SCHEMA = {  # Gemini responseSchema 형식 (OpenAPI 부분집합)
+    "type": "OBJECT",
+    "properties": {k: {"type": "STRING"} for k in ("summary", "prepare", "target")},
+    "required": ["summary", "prepare", "target"],
+}
+
+
+class QuotaExhausted(Exception):
+    """무료 한도 소진. 이번 실행의 나머지는 무료 발췌로 채운다."""
 
 
 class Summarizer:
@@ -43,27 +62,117 @@ class Summarizer:
         self.max_per_run = cfg.get("max_per_run", 40)
         self.used = 0
         self.llm = None
-        if os.environ.get("ANTHROPIC_API_KEY") and cfg.get("use_claude", True):
+        self.gemini_key = os.environ.get("GEMINI_API_KEY", "").strip()
+        self.gemini_models = list(cfg.get("gemini_models", ["gemini-flash-latest", "gemini-2.5-flash"]))
+        self.gemini_interval = float(cfg.get("gemini_interval_sec", 7))  # 무료 등급 분당 요청 제한 대비
+        self._gemini_model: str | None = None
+        self._last_call = 0.0
+        if self.gemini_key:
+            self.llm = "gemini"
+        elif os.environ.get("ANTHROPIC_API_KEY") and cfg.get("use_claude", True):
             import anthropic
 
             self.llm = anthropic.Anthropic()
 
     @property
+    def uses_llm(self) -> bool:
+        return self.llm is not None
+
+    @property
     def mode(self) -> str:
+        if self.llm == "gemini":
+            return "Gemini(무료 등급)"
         return f"Claude({self.model})" if self.llm else "본문 발췌(무료)"
 
-    def summarize(self, a: Activity) -> tuple[str, str]:
+    def summarize(self, a: Activity) -> tuple[str, str, str]:
+        """(내용요약, 준비할 것, 참가대상)"""
         if self.llm and self.used < self.max_per_run:
             self.used += 1
             try:
-                return self._claude(a)
+                return self._gemini(a) if self.llm == "gemini" else self._claude(a)
+            except QuotaExhausted as e:
+                print(f"  ! Gemini 무료 한도 소진 → 이번 실행은 발췌로 채움 ({e})")
+                self.llm = None
             except Exception as e:  # noqa: BLE001 - 요약 실패가 수집 전체를 막지 않도록
-                print(f"  ! 요약 실패 {a.url}: {type(e).__name__}: {e}")
-                return "", ""  # 비워 두면 다음 실행 때 다시 시도
+                print(f"  ! 요약 실패 {a.url}: {type(e).__name__}: {str(e)[:200]}")
+                return "", "", ""  # 비워 두면 다음 실행 때 다시 시도
         label = "(포스터 OCR)" if "[포스터 OCR]" in a.description else "(발췌)"
-        return excerpt(a.description.replace("[포스터 OCR]", " "), a.title, label)
+        summary, prepare = excerpt(a.description.replace("[포스터 OCR]", " "), a.title, label)
+        return summary, prepare, ", ".join(a.targets)
 
-    def _claude(self, a: Activity) -> tuple[str, str]:
+    # ------------------------------------------------------------------ Gemini
+    def _gemini(self, a: Activity) -> tuple[str, str, str]:
+        parts: list[dict] = []
+        for url in a.image_urls[:3]:
+            try:
+                data, _ = self.client.get_bytes(url)
+                parts += [{"inline_data": {"mime_type": "image/jpeg", "data": base64.standard_b64encode(j).decode()}}
+                          for j in _jpeg_pieces(data)]
+            except Exception as e:  # noqa: BLE001
+                print(f"  ! 이미지 실패 {url}: {e}")
+        parts = parts[:MAX_IMAGES]
+        parts.append({"text": _post_text(a)})
+        body = {
+            "system_instruction": {"parts": [{"text": SYSTEM_PROMPT}]},
+            "contents": [{"role": "user", "parts": parts}],
+            "generationConfig": {"responseMimeType": "application/json", "responseSchema": GEMINI_SCHEMA,
+                                 "temperature": 0.2},
+        }
+        data = self._gemini_call(body)
+        cand = (data.get("candidates") or [{}])[0]
+        text = "".join(p.get("text", "") for p in (cand.get("content") or {}).get("parts", []))
+        try:
+            out = json.loads(text)
+        except json.JSONDecodeError:
+            print(f"  ! Gemini 응답 형식 오류 {a.url}: {cand.get('finishReason')}")
+            return "", "", ""
+        return tuple(str(out.get(k, "")).strip() for k in ("summary", "prepare", "target"))
+
+    def _gemini_call(self, body: dict) -> dict:
+        headers = {"x-goog-api-key": self.gemini_key}
+        models = [self._gemini_model] if self._gemini_model else self.gemini_models
+        for attempt in range(2):
+            for model in models:
+                wait = self.gemini_interval - (time.monotonic() - self._last_call)
+                if wait > 0:
+                    time.sleep(wait)
+                self._last_call = time.monotonic()
+                r = requests.post(f"{GEMINI_BASE}/models/{model}:generateContent",
+                                  headers=headers, json=body, timeout=90)
+                if r.status_code == 200:
+                    if self._gemini_model != model:
+                        print(f"  · Gemini 모델: {model}")
+                    self._gemini_model = model
+                    return r.json()
+                if r.status_code == 404:  # 모델 이름이 바뀌었거나 없어짐 → 다음 후보
+                    continue
+                if r.status_code == 429:
+                    if attempt == 0:
+                        time.sleep(40)  # 분당 한도일 수 있으니 한 번 쉬었다가 재시도
+                        break
+                    raise QuotaExhausted(r.text[:200])
+                r.raise_for_status()
+            else:
+                discovered = self._discover_flash_model()
+                if not discovered or discovered in models:
+                    raise RuntimeError("사용 가능한 Gemini Flash 모델을 찾지 못했습니다")
+                models = [discovered]
+        raise QuotaExhausted("재시도 후에도 한도 초과")
+
+    def _discover_flash_model(self) -> str | None:
+        """설정한 모델이 모두 없으면, API에 모델 목록을 물어 최신 Flash 모델을 고른다."""
+        r = requests.get(f"{GEMINI_BASE}/models", headers={"x-goog-api-key": self.gemini_key},
+                         params={"pageSize": 200}, timeout=30)
+        r.raise_for_status()
+        names = [m["name"].split("/", 1)[-1] for m in r.json().get("models", [])
+                 if "generateContent" in m.get("supportedGenerationMethods", [])
+                 and "flash" in m["name"] and not any(x in m["name"] for x in ("lite", "image", "tts", "live", "exp"))]
+        names.sort(key=lambda n: ("preview" in n, [-int(x) for x in re.findall(r"\d+", n)[:2]]))
+        return names[0] if names else None
+
+    # ------------------------------------------------------------------ Claude
+
+    def _claude(self, a: Activity) -> tuple[str, str, str]:
         import anthropic
 
         content: list[dict] = []
@@ -74,9 +183,7 @@ class Summarizer:
             except Exception as e:  # noqa: BLE001
                 print(f"  ! 이미지 실패 {url}: {e}")
         content = content[:MAX_IMAGES]
-        content.append({"type": "text", "text": (
-            f"제목: {a.title}\n주최: {a.organizer}\n구분: {a.kind}\n분야: {', '.join(a.categories)}\n\n"
-            f"본문:\n{a.description[:MAX_TEXT_CHARS] or '(본문 텍스트 없음 - 이미지 참고)'}")})
+        content.append({"type": "text", "text": _post_text(a)})
 
         kwargs = dict(
             model=self.model,
@@ -94,13 +201,24 @@ class Summarizer:
 
         if response.stop_reason == "refusal":
             print(f"  ! 요약 거절됨 {a.url}")
-            return "", ""
+            return "", "", ""
         text = next((b.text for b in response.content if b.type == "text"), "")
         try:
             data = json.loads(text)
         except json.JSONDecodeError:
-            return "", ""
-        return data.get("summary", "").strip(), data.get("prepare", "").strip()
+            return "", "", ""
+        return tuple(str(data.get(k, "")).strip() for k in ("summary", "prepare", "target"))
+
+
+def _post_text(a: Activity) -> str:
+    body = a.description.replace("[포스터 OCR]", "\n[포스터 글자 인식 결과 - 오타 있음]\n")
+    return (f"제목: {a.title}\n주최: {a.organizer}\n구분: {a.kind}\n분야: {', '.join(a.categories)}\n"
+            f"링커리어 표기 대상: {', '.join(a.targets) or '-'}\n\n"
+            f"본문:\n{body[:MAX_TEXT_CHARS] or '(본문 텍스트 없음 - 이미지 참고)'}")
+
+
+def _jpeg_pieces(data: bytes) -> list[bytes]:
+    return [base64.standard_b64decode(b["source"]["data"]) for b in _image_blocks(data)]
 
 
 def _image_blocks(data: bytes) -> list[dict]:

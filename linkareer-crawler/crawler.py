@@ -44,6 +44,7 @@ class Activity:
     view_count: int | None = None
     description: str = ""
     image_urls: list[str] = field(default_factory=list)  # 포스터 + 본문 이미지
+    targets: list[str] = field(default_factory=list)  # 링커리어 참여대상 (예: 대학생)
 
     @property
     def url(self) -> str:
@@ -61,6 +62,7 @@ class Activity:
         if len(other.description) > len(self.description):
             self.description = other.description
         self.image_urls = self.image_urls or other.image_urls
+        self.targets = self.targets or other.targets
 
 
 class LinkareerClient:
@@ -249,6 +251,8 @@ def _to_activity(d: dict, refs: dict, kind: str) -> Activity:
         view_count=int(views) if isinstance(views, (int, float)) else None,
         description=BeautifulSoup(str(desc), "html.parser").get_text(" ", strip=True)[:8000],
         image_urls=images,
+        targets=[t["name"] for t in (_resolve(x, refs) for x in d.get("targets") or [])
+                 if isinstance(t, dict) and t.get("name")],
     )
 
 

@@ -102,9 +102,9 @@ def main() -> int:
             if m.label == "제외":
                 seen_rows.append([a.id, today.isoformat(), f"제외({m.score})"])
                 continue
-            summary, prepare = summarizer.summarize(a)
+            summary, prepare, target = summarizer.summarize(a)
             print(f"  + [{m.label}] {a.title} / {a.organizer or '-'}")
-            new_rows.append(to_row(a, m, summary, prepare, today))
+            new_rows.append(to_row(a, m, summary, prepare, target, today))
 
     backfill(existing, client, relevance, summarizer, config, use_ocr)
     print("요약:", ", ".join(f"{k} {v}" for k, v in stats.items()))
@@ -121,11 +121,11 @@ def main() -> int:
     return 0
 
 
-def to_row(a: Activity, m, summary: str, prepare: str, today) -> dict:
+def to_row(a: Activity, m, summary: str, prepare: str, target: str, today) -> dict:
     return {
         "ID": a.id, "구분": a.kind, "추천도": m.label, "제목": a.title, "주최": a.organizer,
         "기관유형": a.organization_type, "분야": ", ".join(a.categories), "마감일": a.close_date,
-        "내용요약": summary, "준비할 것": prepare, "추천이유": " / ".join(m.reasons),
+        "내용요약": summary, "준비할 것": prepare, "참가대상": target, "추천이유": " / ".join(m.reasons),
         "시상(만원)": a.reward or "", "링크": a.url, "수집일": today.isoformat(),
     }
 
@@ -138,7 +138,7 @@ def backfill(rows: list[dict], client, relevance, summarizer, config, use_ocr: b
     today = datetime.now(KST).date()
     def needs(r):  # 요약이 없거나, 무료 발췌만 있는데 지금은 Claude를 쓸 수 있는 경우
         text = str(r.get("내용요약", "")).strip()
-        return not text or (summarizer.llm is not None and text.startswith("(발췌)"))
+        return not text or (summarizer.uses_llm and text.startswith(("(발췌)", "(포스터 OCR)")))
 
     targets = [r for r in rows if needs(r) and (to_date(r.get("마감일")) or today) >= today][:limit]
     if not targets:
@@ -154,8 +154,8 @@ def backfill(rows: list[dict], client, relevance, summarizer, config, use_ocr: b
         if use_ocr and ocr.needs_ocr(a):
             ocr.read_posters(client, a)
         m = relevance.evaluate(a)
-        summary, prepare = summarizer.summarize(a)
-        r["내용요약"], r["준비할 것"] = summary, prepare
+        summary, prepare, target = summarizer.summarize(a)
+        r["내용요약"], r["준비할 것"], r["참가대상"] = summary, prepare, target
         r["추천이유"] = " / ".join(m.reasons)
         for key, value in (("기관유형", a.organization_type), ("분야", ", ".join(a.categories)),
                            ("시상(만원)", a.reward or "")):
