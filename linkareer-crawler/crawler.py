@@ -43,6 +43,7 @@ class Activity:
     close_date: date | None = None
     view_count: int | None = None
     description: str = ""
+    image_urls: list[str] = field(default_factory=list)  # 포스터 + 본문 이미지
 
     @property
     def url(self) -> str:
@@ -59,6 +60,7 @@ class Activity:
         self.view_count = self.view_count if self.view_count is not None else other.view_count
         if len(other.description) > len(self.description):
             self.description = other.description
+        self.image_urls = self.image_urls or other.image_urls
 
 
 class LinkareerClient:
@@ -100,6 +102,12 @@ class LinkareerClient:
                     found[a.id] = a
         return list(found.values())
 
+    def get_bytes(self, url: str) -> tuple[bytes, str]:
+        """이미지 다운로드 (CDN이라 요청 간격 제한 없음)."""
+        resp = self.session.get(url, timeout=30)
+        resp.raise_for_status()
+        return resp.content, resp.headers.get("content-type", "")
+
     def enrich(self, activity: Activity) -> None:
         """상세 페이지에서 주최사/마감일/본문을 보강한다."""
         html = self.get(activity.url)
@@ -138,14 +146,11 @@ def parse_detail(html: str, base: Activity) -> Activity:
         result.title = og_title.get("content", "").split("|")[0].strip()
     meta_desc = soup.find("meta", attrs={"name": "description"})
     meta_text = meta_desc.get("content", "") if meta_desc else ""
-    if result.description:
-        result.description = f"{meta_text} {result.description}".strip()
-    else:
-        # 본문을 JSON에서 못 찾은 경우에만 페이지 전체 텍스트 사용
-        # (사이드바의 다른 공고 제목 때문에 오탐이 생길 수 있음)
-        for tag in soup(["script", "style", "noscript", "header", "footer", "nav", "aside"]):
-            tag.decompose()
-        result.description = f"{meta_text} {soup.get_text(' ', strip=True)}"[:8000]
+    if "링커리어에서" in meta_text:  # 본문 없는 공고에 붙는 사이트 공통 문구
+        meta_text = ""
+    # 페이지 전체 텍스트는 쓰지 않는다: 본문이 이미지뿐인 공고에서 사이드바의
+    # 다른 공고·자소서 글이 섞여 키워드 오탐이 생긴다.
+    result.description = f"{meta_text} {result.description}".strip()
     return result
 
 
@@ -220,6 +225,16 @@ def _to_activity(d: dict, refs: dict, kind: str) -> Activity:
     desc = _resolve(desc, refs)
     if isinstance(desc, dict):
         desc = _first(desc, "text", "content") or ""
+    images = []
+    for f in d.get("files") or []:  # 파일 유형 2 = 포스터
+        f = _resolve(f, refs)
+        if isinstance(f, dict) and f.get("url") and (f.get("type") or {}).get("__ref", "").endswith(":2"):
+            images.append(f["url"])
+    if not images:
+        thumb = _resolve(d.get("thumbnailImage") or {}, refs)
+        if isinstance(thumb, dict) and thumb.get("url"):
+            images.append(thumb["url"])
+    images += [u for u in re.findall(r'<img[^>]+src="([^"]+)"', str(desc)) if u.startswith("http")]
     views = _first(d, "viewCount", "views")
     reward = d.get("tenThousandUnitOfReward")
     return Activity(
@@ -233,6 +248,7 @@ def _to_activity(d: dict, refs: dict, kind: str) -> Activity:
         close_date=_to_date(_first(d, "recruitCloseAt", "closeAt", "endAt", "deadline", "dueDate")),
         view_count=int(views) if isinstance(views, (int, float)) else None,
         description=BeautifulSoup(str(desc), "html.parser").get_text(" ", strip=True)[:8000],
+        image_urls=images,
     )
 
 

@@ -1,7 +1,7 @@
 """링커리어 식품/건강 공모전·대외활동 수집기.
 
 사용 예:
-  python main.py                 # 설정대로 실행 (SPREADSHEET_ID 있으면 구글시트, 없으면 엑셀)
+  python main.py                 # SPREADSHEET_ID 있으면 구글시트, 없으면 엑셀(output/linkareer.xlsx)
   python main.py --excel-only    # 엑셀만
   python main.py --dry-run       # 저장하지 않고 결과만 출력
   python main.py --dump --pages 1  # 받은 HTML을 debug/ 에 저장 (구조 확인용)
@@ -17,9 +17,11 @@ from pathlib import Path
 
 import yaml
 
-from crawler import KST, LinkareerClient
+from crawler import KST, Activity, LinkareerClient
 from filters import RelevanceFilter
-from storage import ExcelStorage, SheetStorage
+from storage import ExcelStorage, SheetStorage, merge_rows
+from summarizer import Summarizer
+import ocr
 
 ROOT = Path(__file__).resolve().parent
 
@@ -47,17 +49,27 @@ def main() -> int:
         if sheet_id and not args.excel_only:
             storages.append(SheetStorage(sheet_id))
         storages.append(ExcelStorage(args.excel))
+    primary = storages[0] if storages else None  # 구글시트가 있으면 시트가 원본
+    existing = primary.load_rows() if primary else []
+    if isinstance(primary, SheetStorage):
+        primary.seed_settings(config)
+    settings = primary.load_settings() if primary else None
     seen: set[str] = set().union(*(s.seen_ids() for s in storages)) if storages else set()
-    print(f"이미 처리한 공고: {len(seen)}건")
+    print(f"기존 목록 {len(existing)}건, 이미 확인한 공고 {len(seen)}건")
+    if settings is not None:
+        print("설정 탭 조건:", ", ".join(f"{k} {len(v)}개" for k, v in settings.items()) or "없음")
 
     client = LinkareerClient(
         delay_sec=crawl_cfg.get("request_delay_sec", 1.5),
         dump_dir=ROOT / "debug" if args.dump else None,
     )
-    relevance = RelevanceFilter(config)
+    relevance = RelevanceFilter(config, settings)
+    summarizer = Summarizer(client, config)
+    use_ocr = config.get("crawl", {}).get("poster_ocr", True) and ocr.available()
+    print(f"요약 방식: {summarizer.mode}, 포스터 OCR: {'사용' if use_ocr else '미설치/꺼짐'}")
 
-    rows, seen_rows = [], []
-    stats = {"목록": 0, "신규": 0, "마감": 0, "추천": 0, "검토": 0, "제외": 0, "오류": 0}
+    new_rows, seen_rows = [], []
+    stats = {"목록": 0, "신규": 0, "추천": 0, "검토": 0, "제외": 0, "오류": 0}
     for kind, path in crawl_cfg.get("lists", {}).items():
         print(f"[{kind}] 목록 수집 중...")
         try:
@@ -73,44 +85,82 @@ def main() -> int:
                 continue
             seen.add(a.id)
             stats["신규"] += 1
-            if fetch_detail and not (a.close_date and a.close_date < today):
+            if fetch_detail:
                 try:
                     client.enrich(a)
                 except Exception as e:  # noqa: BLE001
                     print(f"  ! 상세 실패 {a.url}: {e}", file=sys.stderr)
                     stats["오류"] += 1
                     continue  # _seen 에 기록하지 않음 → 다음 실행 때 재시도
+                if use_ocr and ocr.needs_ocr(a):
+                    print(f"  · 포스터 OCR: {a.title[:30]} ({ocr.read_posters(client, a)}자)")
             if a.close_date and a.close_date < today:
-                stats["마감"] += 1
                 seen_rows.append([a.id, today.isoformat(), "마감"])
                 continue
-
             m = relevance.evaluate(a)
             stats[m.label] += 1
             if m.label == "제외":
                 seen_rows.append([a.id, today.isoformat(), f"제외({m.score})"])
                 continue
-            print(f"  + [{m.label} {m.score}] {a.title} / {a.organizer or '-'}")
-            rows.append({
-                "ID": a.id, "구분": a.kind, "추천도": m.label, "점수": m.score,
-                "제목": a.title, "주최": a.organizer, "기관유형": a.organization_type,
-                "분야": ", ".join(a.categories), "마감일": a.close_date,
-                "시상(만원)": a.reward or "", "매칭근거": " | ".join(m.reasons),
-                "링크": a.url, "수집일": today.isoformat(),
-            })
+            summary, prepare = summarizer.summarize(a)
+            print(f"  + [{m.label}] {a.title} / {a.organizer or '-'}")
+            new_rows.append(to_row(a, m, summary, prepare, today))
 
-    rows.sort(key=lambda r: (-r["점수"], r["마감일"] or today))
+    backfill(existing, client, relevance, summarizer, config, use_ocr)
     print("요약:", ", ".join(f"{k} {v}" for k, v in stats.items()))
 
+    rows = merge_rows(existing, new_rows)
     for s in storages:
-        s.append(rows, seen_rows)
-        print(f"저장 완료: {type(s).__name__} ({len(rows)}건 추가)")
+        s.save(rows, seen_rows)
+        print(f"저장 완료: {type(s).__name__} (신규 {len(new_rows)}건, 전체 {len(rows)}건)")
 
     if stats["목록"] == 0:
         print("목록을 하나도 못 읽었습니다. 사이트 구조가 바뀌었거나 접속이 차단됐을 수 있습니다. "
               "--dump 로 HTML을 확인하세요.", file=sys.stderr)
         return 1
     return 0
+
+
+def to_row(a: Activity, m, summary: str, prepare: str, today) -> dict:
+    return {
+        "ID": a.id, "구분": a.kind, "추천도": m.label, "제목": a.title, "주최": a.organizer,
+        "기관유형": a.organization_type, "분야": ", ".join(a.categories), "마감일": a.close_date,
+        "내용요약": summary, "준비할 것": prepare, "추천이유": " / ".join(m.reasons),
+        "시상(만원)": a.reward or "", "링크": a.url, "수집일": today.isoformat(),
+    }
+
+
+def backfill(rows: list[dict], client, relevance, summarizer, config, use_ocr: bool) -> None:
+    """요약이 비어 있는 기존 행을 채우고, 추천이유를 현재 기준 문구로 갱신한다 (추천도는 유지)."""
+    limit = config.get("summary", {}).get("backfill_per_run", 30)
+    from storage import to_date
+
+    today = datetime.now(KST).date()
+    def needs(r):  # 요약이 없거나, 무료 발췌만 있는데 지금은 Claude를 쓸 수 있는 경우
+        text = str(r.get("내용요약", "")).strip()
+        return not text or (summarizer.llm is not None and text.startswith("(발췌)"))
+
+    targets = [r for r in rows if needs(r) and (to_date(r.get("마감일")) or today) >= today][:limit]
+    if not targets:
+        return
+    print(f"기존 행 요약 보강: {len(targets)}건")
+    for r in targets:
+        a = Activity(id=r["ID"], kind=str(r.get("구분", "")))
+        try:
+            client.enrich(a)
+        except Exception as e:  # noqa: BLE001 - 마감돼 내려간 공고 등
+            print(f"  ! 상세 실패 {a.url}: {e}", file=sys.stderr)
+            continue
+        if use_ocr and ocr.needs_ocr(a):
+            ocr.read_posters(client, a)
+        m = relevance.evaluate(a)
+        summary, prepare = summarizer.summarize(a)
+        r["내용요약"], r["준비할 것"] = summary, prepare
+        r["추천이유"] = " / ".join(m.reasons)
+        for key, value in (("기관유형", a.organization_type), ("분야", ", ".join(a.categories)),
+                           ("시상(만원)", a.reward or "")):
+            if value and not r.get(key):
+                r[key] = value
 
 
 if __name__ == "__main__":
