@@ -31,8 +31,10 @@ jobs:
         env:
           SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}  # 무료 등급 Gemini로 문장 요약
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}  # (선택, 유료) 둘 다 없으면 본문 발췌
+          # 요약은 크롤러가 무료 발췌로 먼저 채우고, 이후 Claude 루틴이 문장으로 다시 씁니다 (CLAUDE_SUMMARY.md).
+          # Gemini/Claude API로 바로 요약하려면 아래 줄을 추가하세요 (선택):
+          #   GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          #   ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: python main.py
       - name: 이번 실행 결과 엑셀 업로드
         if: always()
