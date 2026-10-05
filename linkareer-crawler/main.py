@@ -10,6 +10,8 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import os
 import sys
 from datetime import datetime
@@ -59,6 +61,15 @@ def main() -> int:
     if settings is not None:
         print("설정 탭 조건:", ", ".join(f"{k} {len(v)}개" for k, v in settings.items()) or "없음")
 
+    # 설정(검색 조건)이 바뀌었으면, 예전 조건으로 '제외'됐던 공고 중 아직 모집 중인 것을 다시 검사한다
+    fingerprint = hashlib.md5(json.dumps(settings if settings is not None else config, sort_keys=True,
+                                         ensure_ascii=False, default=str).encode()).hexdigest()[:12]
+    recheck: set[str] = set()
+    if primary and primary.get_fingerprint() != fingerprint:
+        recheck = {i for i, res in primary.seen_results().items() if res.startswith("제외")}
+        if recheck:
+            print(f"검색 조건이 바뀌어, 이전에 제외된 공고 {len(recheck)}건 중 모집 중인 것을 다시 검사합니다")
+
     client = LinkareerClient(
         delay_sec=crawl_cfg.get("request_delay_sec", 1.5),
         dump_dir=ROOT / "debug" if args.dump else None,
@@ -69,7 +80,7 @@ def main() -> int:
     print(f"요약 방식: {summarizer.mode}, 포스터 OCR: {'사용' if use_ocr else '미설치/꺼짐'}")
 
     new_rows, seen_rows = [], []
-    stats = {"목록": 0, "신규": 0, "추천": 0, "검토": 0, "제외": 0, "오류": 0}
+    stats = {"목록": 0, "신규": 0, "재검사": 0, "추천": 0, "검토": 0, "제외": 0, "오류": 0}
     for kind, path in crawl_cfg.get("lists", {}).items():
         print(f"[{kind}] 목록 수집 중...")
         try:
@@ -81,10 +92,12 @@ def main() -> int:
         stats["목록"] += len(items)
 
         for a in items:
-            if a.id in seen:
+            rechecking = a.id in recheck
+            if a.id in seen and not rechecking:
                 continue
             seen.add(a.id)
-            stats["신규"] += 1
+            recheck.discard(a.id)  # 두 목록에 같은 공고가 있어도 한 번만
+            stats["재검사" if rechecking else "신규"] += 1
             if fetch_detail:
                 try:
                     client.enrich(a)
@@ -100,8 +113,11 @@ def main() -> int:
             m = relevance.evaluate(a)
             stats[m.label] += 1
             if m.label == "제외":
-                seen_rows.append([a.id, today.isoformat(), f"제외({m.score})"])
+                if not rechecking:  # 재검사에서 또 제외면 _seen 에 중복 기록하지 않음
+                    seen_rows.append([a.id, today.isoformat(), f"제외({m.score})"])
                 continue
+            if rechecking:
+                print(f"  ↺ 재검사로 새로 포함: {a.title}")
             summary, prepare, target = summarizer.summarize(a)
             print(f"  + [{m.label}] {a.title} / {a.organizer or '-'}")
             new_rows.append(to_row(a, m, summary, prepare, target, today))
@@ -120,6 +136,8 @@ def main() -> int:
     for s in storages:
         s.save(rows, seen_rows)
         print(f"저장 완료: {type(s).__name__} (신규 {len(new_rows)}건, 전체 {len(rows)}건)")
+    if primary and stats["목록"] and not stats["오류"]:
+        primary.set_fingerprint(fingerprint)  # 목록을 끝까지 다 본 실행에서만 갱신
 
     if stats["목록"] == 0:
         print("목록을 하나도 못 읽었습니다. 사이트 구조가 바뀌었거나 접속이 차단됐을 수 있습니다. "

@@ -13,7 +13,7 @@ concurrency:  # 두 번 눌러도 동시에 돌지 않게 (시트를 동시에 �
 jobs:
   crawl:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 120  # 첫 실행이나 조건 변경 후 재검사 때는 공고 수백 건을 읽어 오래 걸림
     defaults:
       run:
         working-directory: linkareer-crawler
