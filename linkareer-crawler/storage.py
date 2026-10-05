@@ -210,11 +210,18 @@ class SheetStorage:
                 out[str(row[0])] = row[2] if len(row) > 2 else ""
         return out
 
+    def _ensure_seen_columns(self) -> None:
+        if self.seen_ws.col_count < 5:  # _seen 탭은 원래 3열(A~C)이라 D~E열을 늘려야 지문을 저장할 수 있음
+            self.seen_ws.resize(cols=5)
+
     def get_fingerprint(self) -> str:
-        """마지막으로 전체 검사에 쓴 '설정' 지문 (_seen 탭 E1)."""
+        """마지막으로 전체 검사에 쓴 '설정' 지문 (_seen 탭 E1). 아직 없으면 빈 값."""
+        if self.seen_ws.col_count < 5:
+            return ""
         return (self.seen_ws.acell("E1").value or "").strip()
 
     def set_fingerprint(self, value: str) -> None:
+        self._ensure_seen_columns()
         self.seen_ws.update([["설정 지문(자동)", value]], "D1")
 
     def load_settings(self) -> dict[str, list[str]] | None:
