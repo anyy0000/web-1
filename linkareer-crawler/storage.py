@@ -45,7 +45,7 @@ GUIDE = [
     ["", "", ""],
     ["판정", "", "합계 4점 이상 = 추천, 2~3점 = 검토, 그 미만은 시트에 넣지 않음"],
     ["사용법", "", "A~B열에 한 줄씩 '구분'과 '값'을 적거나 지우면 다음 실행부터 반영. 빈 줄은 무시"],
-    ["적용 범위", "", "이후 새로 올라오는 공고부터 적용. 이미 제외된 공고도 다시 보려면 _seen 탭 2행부터 아래를 지우기"],
+    ["적용 범위", "", "다음 실행부터 적용. 조건을 바꾸면 예전에 제외된 공고 중 아직 모집 중인 것도 다시 검사함"],
     ["분야 예시", "", "요리/식품, 의료/보건, 체육/헬스, 뷰티/미용/화장품, 기획/아이디어, 광고/마케팅, 서포터즈, 봉사활동, 과학/공학"],
     ["re:로 시작", "", "특수 패턴(정규식)입니다. 예: '대상'이 '참가대상'과 헷갈리지 않게 막는 용도라 그대로 두세요"],
 ]
@@ -202,6 +202,21 @@ class SheetStorage:
     def seen_ids(self) -> set[str]:
         return {r["ID"] for r in self.load_rows()} | {str(i) for i in self.seen_ws.col_values(1)[1:] if i}
 
+    def seen_results(self) -> dict[str, str]:
+        """_seen 탭의 {공고 ID: 결과} (예: '제외(0)', '마감(...)')."""
+        out: dict[str, str] = {}
+        for row in self.seen_ws.get_all_values()[1:]:
+            if row and row[0]:
+                out[str(row[0])] = row[2] if len(row) > 2 else ""
+        return out
+
+    def get_fingerprint(self) -> str:
+        """마지막으로 전체 검사에 쓴 '설정' 지문 (_seen 탭 E1)."""
+        return (self.seen_ws.acell("E1").value or "").strip()
+
+    def set_fingerprint(self, value: str) -> None:
+        self.seen_ws.update([["설정 지문(자동)", value]], "D1")
+
     def load_settings(self) -> dict[str, list[str]] | None:
         settings: dict[str, list[str]] = {}
         for row in self.settings_ws.get_all_values()[1:]:
@@ -271,6 +286,15 @@ class ExcelStorage:
 
     def load_settings(self) -> dict[str, list[str]] | None:
         return None  # 엑셀 모드는 config.yaml 만 사용
+
+    def seen_results(self) -> dict[str, str]:
+        return {}
+
+    def get_fingerprint(self) -> str:
+        return ""
+
+    def set_fingerprint(self, value: str) -> None:
+        pass
 
     def save(self, rows: list[dict], seen: list[list]) -> None:
         header, table = build_table(rows)
