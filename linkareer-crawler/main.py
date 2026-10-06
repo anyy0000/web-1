@@ -67,7 +67,8 @@ def main() -> int:
     recheck: set[str] = set()
     settings_changed = bool(primary) and primary.get_fingerprint() != fingerprint
     if settings_changed:
-        recheck = {i for i, res in primary.seen_results().items() if res.startswith("제외")}
+        in_sheet = {r["ID"] for r in existing}  # 시트에 있는 공고는 아래 '기존 행 재평가'에서 다룸
+        recheck = {i for i, res in primary.seen_results().items() if res.startswith("제외") and i not in in_sheet}
         if recheck:
             print(f"검색 조건이 바뀌어, 이전에 제외된 공고 {len(recheck)}건 중 모집 중인 것을 다시 검사합니다")
 
