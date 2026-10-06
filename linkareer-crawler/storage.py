@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -45,9 +46,11 @@ GUIDE = [
     ["", "", ""],
     ["판정", "", "합계 4점 이상 = 추천, 2~3점 = 검토, 그 미만은 시트에 넣지 않음"],
     ["사용법", "", "A~B열에 한 줄씩 '구분'과 '값'을 적거나 지우면 다음 실행부터 반영. 빈 줄은 무시"],
-    ["적용 범위", "", "다음 실행부터 적용. 조건을 바꾸면 예전에 제외된 공고 중 아직 모집 중인 것도 다시 검사함"],
+    ["적용 범위", "", "다음 실행부터 적용. 조건을 바꾸면 예전에 제외된 공고와 이미 시트에 있는 공고도 새 조건으로 다시 매김 "
+                    "(제외로 바뀐 행은 상태·메모가 비어 있을 때만 삭제)"],
     ["분야 예시", "", "요리/식품, 의료/보건, 체육/헬스, 뷰티/미용/화장품, 기획/아이디어, 광고/마케팅, 서포터즈, 봉사활동, 과학/공학"],
-    ["re:로 시작", "", "특수 패턴(정규식)입니다. 예: '대상'이 '참가대상'과 헷갈리지 않게 막는 용도라 그대로 두세요"],
+    ["re:로 시작", "", "특수 패턴(정규식)입니다. 관심기업·키워드 모두 가능. 예: '대상'이 '참가대상'과 헷갈리지 않게, "
+                     "'수산'이 '해양수산부'에 걸리지 않게 막는 용도라 그대로 두세요"],
 ]
 # 행 위치와 무관하게 동작 (정렬해도 깨지지 않음)
 DDAY_FORMULA = f'=IF(INDIRECT("{DEADLINE_COL}"&ROW())="","",DAYS(INDIRECT("{DEADLINE_COL}"&ROW()),TODAY()))'
@@ -121,6 +124,54 @@ def merge_rows(existing: list[dict], new: list[dict]) -> list[dict]:
                 if v not in (None, "") and old.get(k) in (None, ""):
                     old[k] = v
     return list(by_id.values())
+
+
+def _title_key(title) -> str:
+    """중복 비교용 제목: 띄어쓰기·기호·괄호 꾸밈을 빼고 소문자로 ('경기미 쌀떡볶이' = '경기미쌀떡볶이')."""
+    return re.sub(r"[^0-9a-z가-힣]", "", str(title).lower())
+
+
+def _same_post(a: str, b: str) -> bool:
+    """제목이 같거나, 한쪽이 다른 쪽 뒤에 부제·(기간연장) 등만 붙인 것이면 같은 공고로 본다."""
+    short, long_ = sorted((a, b), key=len)
+    return len(short) >= 8 and long_.startswith(short)
+
+
+def _keep_rank(r: dict) -> tuple:
+    """중복 중 남길 행 우선순위: 사람이 상태·메모를 적은 행 → 추천 → 요약이 문장(Claude)인 행 → 요약이 긴 행."""
+    summary = str(r.get("내용요약", ""))
+    return (bool(str(r.get("상태", "")).strip() or str(r.get("메모", "")).strip()),
+            r.get("추천도") == "추천",
+            bool(summary) and not summary.startswith(("(발췌)", "(포스터 OCR)")),
+            len(summary))
+
+
+def dedupe_rows(rows: list[dict]) -> tuple[list[dict], list[tuple[str, str]]]:
+    """주최 측이 같은 공고를 여러 번 올린 경우(제목·마감일이 같음) 한 행으로 합친다.
+    반환: (남은 행, [(지운 ID, 남긴 ID)]). 남긴 행의 빈 칸은 지운 행의 값으로 채운다."""
+    groups: list[list[dict]] = []
+    for r in rows:
+        key, d = _title_key(r.get("제목", "")), to_date(r.get("마감일"))
+        for g in groups:
+            if d and to_date(g[0].get("마감일")) == d and _same_post(key, _title_key(g[0].get("제목", ""))):
+                g.append(r)
+                break
+        else:
+            groups.append([r])
+
+    kept, dropped = [], []
+    for g in groups:
+        g.sort(key=_keep_rank, reverse=True)
+        keep = g[0]
+        for other in g[1:]:
+            if other.get("추천도") == "추천" and keep.get("추천도") != "추천":
+                keep["추천도"], keep["추천이유"] = "추천", other.get("추천이유", "")
+            for k, v in other.items():
+                if k not in ("ID", "링크") and v not in (None, "") and keep.get(k) in (None, ""):
+                    keep[k] = v
+            dropped.append((str(other["ID"]), str(keep["ID"])))
+        kept.append(keep)
+    return kept, dropped
 
 
 class SheetStorage:

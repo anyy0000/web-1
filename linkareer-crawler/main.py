@@ -21,7 +21,7 @@ import yaml
 
 from crawler import KST, Activity, LinkareerClient
 from filters import RelevanceFilter
-from storage import ExcelStorage, SheetStorage, merge_rows, to_date
+from storage import ExcelStorage, SheetStorage, dedupe_rows, merge_rows, to_date
 from summarizer import Summarizer
 import ocr
 
@@ -65,7 +65,8 @@ def main() -> int:
     fingerprint = hashlib.md5(json.dumps(settings if settings is not None else config, sort_keys=True,
                                          ensure_ascii=False, default=str).encode()).hexdigest()[:12]
     recheck: set[str] = set()
-    if primary and primary.get_fingerprint() != fingerprint:
+    settings_changed = bool(primary) and primary.get_fingerprint() != fingerprint
+    if settings_changed:
         recheck = {i for i, res in primary.seen_results().items() if res.startswith("제외")}
         if recheck:
             print(f"검색 조건이 바뀌어, 이전에 제외된 공고 {len(recheck)}건 중 모집 중인 것을 다시 검사합니다")
@@ -122,7 +123,13 @@ def main() -> int:
             print(f"  + [{m.label}] {a.title} / {a.organizer or '-'}")
             new_rows.append(to_row(a, m, summary, prepare, target, today))
 
-    backfill(existing, client, relevance, summarizer, config, use_ocr)
+    # 설정이 바뀌었으면 이미 시트에 있는 공고의 추천도도 새 조건으로 다시 매긴다
+    dropped = backfill(existing, client, relevance, summarizer, config, use_ocr,
+                       reevaluate=settings_changed and fetch_detail)
+    if dropped:
+        existing = [r for r in existing if r["ID"] not in dropped]
+        seen_rows += [[i, today.isoformat(), f"제외({score}, 조건 변경)"] for i, score in dropped.items()]
+        print(f"바뀐 조건에서 제외된 기존 공고 {len(dropped)}건 삭제")
     print("요약:", ", ".join(f"{k} {v}" for k, v in stats.items()))
 
     rows = merge_rows(existing, new_rows)
@@ -133,6 +140,11 @@ def main() -> int:
         rows = [r for r in rows if r["ID"] not in expired_ids]
         seen_rows += [[r["ID"], today.isoformat(), "마감(목록에서 삭제)"] for r in expired]
         print(f"마감 지난 공고 {len(expired)}건 삭제")
+    # 주최 측이 같은 공고를 여러 번 올린 경우 한 행으로 (지운 ID는 _seen 에 남겨 다시 들어오지 않게)
+    rows, duplicates = dedupe_rows(rows)
+    if duplicates:
+        seen_rows += [[gone, today.isoformat(), f"중복(→{kept})"] for gone, kept in duplicates]
+        print(f"중복 공고 {len(duplicates)}건 합침")
     for s in storages:
         s.save(rows, seen_rows)
         print(f"저장 완료: {type(s).__name__} (신규 {len(new_rows)}건, 전체 {len(rows)}건)")
@@ -155,18 +167,24 @@ def to_row(a: Activity, m, summary: str, prepare: str, target: str, today) -> di
     }
 
 
-def backfill(rows: list[dict], client, relevance, summarizer, config, use_ocr: bool) -> None:
-    """요약이 비어 있는 기존 행을 채우고, 추천이유를 현재 기준 문구로 갱신한다 (추천도는 유지)."""
+def backfill(rows: list[dict], client, relevance, summarizer, config, use_ocr: bool,
+             reevaluate: bool = False) -> dict[str, int]:
+    """기존 행 보강. 요약이 빈 행을 채우고 추천이유를 현재 기준 문구로 갱신한다.
+    reevaluate=True(설정 변경 시)면 모집 중인 모든 행의 추천도도 다시 매기고,
+    제외로 바뀐 행(상태·메모를 적지 않은 것)의 {ID: 점수}를 돌려준다 → 호출 측에서 삭제."""
     limit = config.get("summary", {}).get("backfill_per_run", 30)
     today = datetime.now(KST).date()
     def needs(r):  # 요약이 없거나, 무료 발췌만 있는데 지금은 AI 요약을 쓸 수 있는 경우
         text = str(r.get("내용요약", "")).strip()
         return not text or (summarizer.uses_llm and text.startswith(("(발췌)", "(포스터 OCR)")))
 
-    targets = [r for r in rows if needs(r) and (to_date(r.get("마감일")) or today) >= today][:limit]
+    open_rows = [r for r in rows if (to_date(r.get("마감일")) or today) >= today]
+    to_summarize = {r["ID"] for r in [r for r in open_rows if needs(r)][:limit]}
+    targets = open_rows if reevaluate else [r for r in open_rows if r["ID"] in to_summarize]
     if not targets:
-        return
-    print(f"기존 행 요약 보강: {len(targets)}건")
+        return {}
+    print(f"기존 행 {'재평가' if reevaluate else '요약 보강'}: {len(targets)}건")
+    dropped: dict[str, int] = {}
     for r in targets:
         a = Activity(id=r["ID"], kind=str(r.get("구분", "")))
         try:
@@ -177,16 +195,26 @@ def backfill(rows: list[dict], client, relevance, summarizer, config, use_ocr: b
         if use_ocr and ocr.needs_ocr(a):
             ocr.read_posters(client, a)
         m = relevance.evaluate(a)
-        summary, prepare, target = summarizer.summarize(a)
-        for key, value in (("내용요약", summary), ("준비할 것", prepare), ("참가대상", target)):
-            if value:  # 새 값이 비면 기존 값을 지우지 않는다
-                r[key] = value
+        if reevaluate:
+            touched = str(r.get("상태", "")).strip() or str(r.get("메모", "")).strip()
+            if m.label == "제외" and not touched:
+                dropped[r["ID"]] = m.score
+                print(f"  - 조건 변경으로 제외: {r.get('제목', '')}")
+                continue
+            if m.label != "제외" and r.get("추천도") != m.label:
+                print(f"  · 추천도 {r.get('추천도')} → {m.label}: {r.get('제목', '')}")
+                r["추천도"] = m.label
         r["추천이유"] = " / ".join(m.reasons)
+        if r["ID"] in to_summarize:
+            summary, prepare, target = summarizer.summarize(a)
+            for key, value in (("내용요약", summary), ("준비할 것", prepare), ("참가대상", target)):
+                if value:  # 새 값이 비면 기존 값을 지우지 않는다
+                    r[key] = value
         for key, value in (("기관유형", a.organization_type), ("분야", ", ".join(a.categories)),
                            ("시상(만원)", a.reward or "")):
             if value and not r.get(key):
                 r[key] = value
-
+    return dropped
 
 if __name__ == "__main__":
     sys.exit(main())
