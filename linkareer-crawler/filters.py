@@ -39,9 +39,9 @@ class RelevanceFilter:
         self.blocked_orgs = [_compile(p) for p in items("제외기업", "blocked_organizations")]
         self.categories = items("관심분야", "categories")
         self.sub_categories = items("참고분야", "sub_categories")
-        self.org_keywords = [k.lower() for k in items("주최키워드", "organizer_keywords")]
-        self.content_keywords = [k.lower() for k in items("키워드", "content_keywords")]
-        self.exclude_keywords = [k.lower() for k in items("제외키워드", "exclude_keywords")]
+        self.org_keywords = [_keyword(k) for k in items("주최키워드", "organizer_keywords")]
+        self.content_keywords = [_keyword(k) for k in items("키워드", "content_keywords")]
+        self.exclude_keywords = [_keyword(k) for k in items("제외키워드", "exclude_keywords")]
         scoring = config.get("scoring", {})
         self.recommend = scoring.get("recommend_threshold", 4)
         self.review = scoring.get("review_threshold", 2)
@@ -57,7 +57,7 @@ class RelevanceFilter:
             score += ORG_SCORE
             reasons.append(f"관심 기업·기관 주최({organizer})")
         else:
-            kw = next((k for k in self.org_keywords if k in organizer.lower()), None)
+            kw = next((name for name, p in self.org_keywords if p.search(organizer)), None)
             if kw:
                 score += ORG_KEYWORD_SCORE
                 reasons.append(f"주최사 이름에 '{kw}'")
@@ -77,19 +77,19 @@ class RelevanceFilter:
                 score += SUB_CATEGORY_SCORE
                 reasons.append("참고 분야 " + "·".join(sub_hits))
 
-        title = a.title.lower()
-        title_hits = [k for k in self.content_keywords if k in title]
+        title = a.title
+        title_hits = [name for name, p in self.content_keywords if p.search(title)]
         if title_hits:
             score += TITLE_KEYWORD_SCORE * min(len(title_hits), 2)
             reasons.append("제목 키워드 " + ", ".join(title_hits[:3]))
 
-        body = a.description.lower()
-        body_hits = [k for k in self.content_keywords if k in body and k not in title_hits]
+        body = a.description
+        body_hits = [name for name, p in self.content_keywords if p.search(body) and name not in title_hits]
         if body_hits:
             score += min(len(body_hits) * BODY_KEYWORD_SCORE, BODY_SCORE_CAP)
             reasons.append("본문 키워드 " + ", ".join(body_hits[:4]))
 
-        excl = [k for k in self.exclude_keywords if k in f"{title} {body}"]
+        excl = [name for name, p in self.exclude_keywords if p.search(f"{title} {body}")]
         if excl:
             score += EXCLUDE_SCORE
             reasons.append("감점: " + ", ".join(excl[:3]))
@@ -108,6 +108,15 @@ def _compile(entry: str) -> re.Pattern:
     if entry.startswith("re:"):
         return re.compile(entry[3:])
     return re.compile(re.escape(entry), re.IGNORECASE)
+
+
+def _keyword(entry: str) -> tuple[str, re.Pattern]:
+    """키워드 → (추천이유에 보일 이름, 패턴). 're:' 로 시작하면 정규식 (예: 're:(?<!해양)수산')."""
+    entry = entry.strip()
+    if entry.startswith("re:"):
+        name = re.sub(r"\(\?<?[=!][^)]*\)|[\\^$()|?*+\[\]{}]", "", entry[3:]) or entry
+        return name, re.compile(entry[3:], re.IGNORECASE)
+    return entry, re.compile(re.escape(entry), re.IGNORECASE)
 
 
 def _dedupe(items: list[str]) -> list[str]:
